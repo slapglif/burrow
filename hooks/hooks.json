@@ -1,0 +1,23 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "burrow_open_tunnel",
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "The user is about to open a TCP tunnel via burrow. Review the tool parameters:\n- Verify the target peer name/ID is reasonable\n- Check that the local_port is in a safe range (1024-65535)\n- Check that the remote_port is in a safe range (1024-65535)\n- Ports below 1024 are privileged and should be flagged\n- If anything looks suspicious, respond with 'BLOCK: reason'. Otherwise respond with 'ALLOW'."
+        }
+      ]
+    }
+  ],
+  "SessionStart": [
+    {
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "This system has the burrow P2P plugin installed. Burrow enables:\n- Connecting to a central relay registry for peer discovery\n- Sending messages between peers\n- Transferring files between peers\n- Opening TCP tunnels between peers\n\nAvailable tools: burrow_connect, burrow_list_peers, burrow_send_message, burrow_send_file, burrow_open_tunnel, burrow_serve, burrow_disconnect.\n\nIf the user mentions connecting to other agents, joining a swarm, or P2P networking, use the burrow tools. You can suggest connecting if the context calls for multi-agent collaboration."
+        }
+      ]
+    }
+  ]
+}

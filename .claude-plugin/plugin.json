@@ -1,0 +1,11 @@
+{
+  "name": "burrow",
+  "version": "0.2.0",
+  "description": "Zero-config P2P networking — connect agents to a swarm for messaging, file transfer, and tunneling",
+  "author": {
+    "name": "slapglif"
+  },
+  "repository": "https://github.com/slapglif/burrow",
+  "license": "MIT",
+  "keywords": ["p2p", "networking", "swarm", "messaging", "tunneling"]
+}

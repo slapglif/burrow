@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-06
+
+### Added
+- Claude Code plugin with full P2P tool integration
+- MCP server exposing 7 tools: connect, list_peers, send_message, send_file, open_tunnel, serve, disconnect
+- `connect` skill for quick swarm registration
+- `swarm-status` skill for network overview
+- `burrow-agent` subagent for autonomous P2P networking tasks
+- SessionStart hook for automatic capability awareness
+- PreToolUse hook for tunnel safety (port validation)
+- CLAUDE.md project documentation
+- `mcp>=1.0` dependency
+
+### Fixed
+- CI uses `uv venv` instead of `--system` (externally managed Python fix)
+- Version assertion in tests updated to match v0.1.1
+
 ## [0.1.1] - 2026-03-06
 
 ### Fixed
@@ -37,5 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name resolution (by ID or case-insensitive name)
 - Protocol unit tests (46 passing)
 
+[0.2.0]: https://github.com/slapglif/burrow/releases/tag/v0.2.0
 [0.1.1]: https://github.com/slapglif/burrow/releases/tag/v0.1.1
 [0.1.0]: https://github.com/slapglif/burrow/releases/tag/v0.1.0

@@ -177,7 +177,7 @@ class TestConstants:
         assert protocol.CHUNK_SIZE == 524288
 
     def test_version(self):
-        assert protocol.VERSION == "0.1.1"
+        assert protocol.VERSION == "0.2.0"
 
 
 # ---------------------------------------------------------------------------
