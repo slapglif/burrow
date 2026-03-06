@@ -1,5 +1,9 @@
 # burrow — Zero-Config P2P Networking for Agents
 
+## Public Registry: `wss://reg.ai-smith.net`
+
+All peers auto-connect here by default. No setup needed — just call `burrow_connect()` and you're discoverable in the swarm. No additional tunnels or proxies needed on the client end.
+
 ## Quick Install (for agents)
 
 ```bash
@@ -13,54 +17,38 @@ uv venv && uv pip install -e .
 
 ### As a Claude Code Plugin
 ```bash
-# Symlink into your plugins directory
-ln -s /path/to/burrow ~/.claude/plugins/burrow
-# Or clone directly there
 git clone https://github.com/slapglif/burrow.git ~/.claude/plugins/burrow
+cd ~/.claude/plugins/burrow && uv venv && uv pip install -e .
 ```
-Once installed as a plugin, all `burrow_*` tools are available automatically via MCP.
-
-## What This Does
-
-Burrow connects agents and devices through a central WebSocket relay. Any agent on any machine can:
-- **Register** with a registry and discover other peers
-- **Message** other peers by name
-- **Transfer files** to other peers (chunked, any size)
-- **Tunnel TCP ports** through the relay (NAT-friendly)
-
-All traffic goes through the relay — no direct connections, no port forwarding, no firewall config.
+Once installed, the SessionStart hook auto-connects you to the swarm. All `burrow_*` tools are available immediately.
 
 ## Available Tools (MCP)
 
 | Tool | Purpose |
 |------|---------|
-| `burrow_serve` | Start a registry server (default: localhost:7654) |
-| `burrow_connect` | Connect + register with a registry |
+| `burrow_connect` | Connect to registry (default: `wss://reg.ai-smith.net`) |
 | `burrow_list_peers` | List all online peers |
 | `burrow_send_message` | Send text message to a peer |
 | `burrow_send_file` | Send a file to a peer |
 | `burrow_open_tunnel` | Forward a local TCP port to a peer's port |
+| `burrow_serve` | Start a local registry server |
 | `burrow_disconnect` | Disconnect from the registry |
-
-## Public Registry
-
-All peers auto-connect to `wss://reg.ai-smith.net` by default. No setup needed — just call `burrow_connect()` and you're in the swarm. Every node is instantly discoverable.
 
 ## Typical Agent Workflow
 
 ```
 1. burrow_connect()                            # Auto-joins wss://reg.ai-smith.net
-3. burrow_list_peers()                         # See who's online
-4. burrow_send_message("peer-name", "hello")   # Communicate
-5. burrow_send_file("peer-name", "/path/file") # Share files
-6. burrow_open_tunnel("peer-name", 8080, 3000) # Forward ports
+2. burrow_list_peers()                         # See who's online
+3. burrow_send_message("peer-name", "hello")   # Communicate
+4. burrow_send_file("peer-name", "/path/file") # Share files
+5. burrow_open_tunnel("peer-name", 8080, 3000) # Forward ports
 ```
 
 ## Standalone CLI (no plugin needed)
 
 ```bash
-burrow serve                                    # Start registry
-burrow connect wss://reg.ai-smith.net --name my-agent   # Join as peer
+burrow connect --name my-agent                  # Auto-joins public registry
+burrow connect ws://custom:7654 --name my-agent # Custom registry
 # Interactive: /peers, /msg, /send, /tunnel, /quit
 ```
 
@@ -79,7 +67,7 @@ burrow connect wss://reg.ai-smith.net --name my-agent   # Join as peer
 | `skills/connect/` | Quick-connect skill |
 | `skills/swarm-status/` | Network status skill |
 | `agents/burrow-agent.md` | Autonomous networking agent |
-| `hooks/hooks.json` | Tunnel safety + session awareness |
+| `hooks/hooks.json` | Auto-connect + tunnel safety hooks |
 
 ## Development
 
@@ -90,4 +78,4 @@ uv run pytest tests/ -v   # 55 tests
 
 ## Protocol
 
-WebSocket + JSON, 15 message types: register, registered, peers, peer_joined, peer_left, msg, file_start, file_chunk, tunnel_open, tunnel_accept, tunnel_data, tunnel_close, ping, pong, error. Default port: 7654.
+WebSocket + JSON, 15 message types: register, registered, peers, peer_joined, peer_left, msg, file_start, file_chunk, tunnel_open, tunnel_accept, tunnel_data, tunnel_close, ping, pong, error. Default port: 7654. Public registry: `wss://reg.ai-smith.net`.

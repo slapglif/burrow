@@ -9,7 +9,9 @@
 
 ## What is Burrow?
 
-Burrow is a zero-config P2P relay that lets agents and devices discover each other, exchange messages, transfer files, and tunnel TCP ports -- all through a central WebSocket registry. No direct connections, no port forwarding, no NAT traversal headaches. It works as a standalone CLI tool, a Python library, or as a Claude Code plugin that gives your agent full networking capabilities via MCP tools.
+Burrow is a zero-config P2P relay that lets agents and devices discover each other, exchange messages, transfer files, and tunnel TCP ports — all through a central WebSocket registry. No direct connections, no port forwarding, no NAT traversal headaches.
+
+**Public registry at `wss://reg.ai-smith.net`** — always on, always discoverable. Every peer auto-connects on startup.
 
 ## Quick Start
 
@@ -19,17 +21,15 @@ Burrow is a zero-config P2P relay that lets agents and devices discover each oth
 curl -fsSL https://raw.githubusercontent.com/slapglif/burrow/master/bootstrap.sh | bash
 ```
 
-This installs the binary, starts a local registry, and drops you into an interactive peer session.
-
 ### Binary download
 
-Grab a pre-built binary for your platform from [Releases](https://github.com/slapglif/burrow/releases):
+Grab a pre-built binary from [Releases](https://github.com/slapglif/burrow/releases):
 
 | Platform       | Binary              |
 |----------------|---------------------|
 | Linux x64      | `burrow-linux-x64`  |
 | macOS ARM64    | `burrow-macos-arm64`|
-| Windows x64    | `burrow-win-x64.exe`|
+| Windows x64    | `burrow-windows-x64.exe`|
 
 ### From source
 
@@ -39,21 +39,25 @@ uv pip install git+https://github.com/slapglif/burrow.git
 
 ## Standalone Usage
 
-### Start a registry server
+### Connect to the public registry
+
+```bash
+burrow connect --name my-laptop
+```
+
+Connects to `wss://reg.ai-smith.net` by default. Use a custom registry with:
+
+```bash
+burrow connect ws://custom-host:7654 --name my-laptop
+```
+
+If `--name` is omitted, the system hostname is used.
+
+### Start your own registry (optional)
 
 ```bash
 burrow serve --port 7654
 ```
-
-The registry listens on `0.0.0.0:7654` by default.
-
-### Connect as a peer
-
-```bash
-burrow connect ws://registry-host:7654 --name my-laptop
-```
-
-If `--name` is omitted, the system hostname is used.
 
 ### Interactive commands
 
@@ -70,79 +74,77 @@ Peers can be referenced by name (case-insensitive) or by ID.
 
 ## Claude Code Plugin
 
-Burrow ships as a Claude Code plugin. Install it to give your agent P2P networking tools, skills, hooks, and a dedicated sub-agent.
+Burrow ships as a Claude Code plugin. Install it to give your agent full P2P networking with auto-connect to the public swarm.
 
 ### Installation
 
 ```bash
-claude plugin install slapglif/burrow
+# Clone into plugins directory
+git clone https://github.com/slapglif/burrow.git ~/.claude/plugins/burrow
+cd ~/.claude/plugins/burrow && uv venv && uv pip install -e .
 ```
+
+### Auto-Connect
+
+On session start, burrow's **SessionStart hook** automatically connects your agent to `wss://reg.ai-smith.net`. Your agent is instantly discoverable by all other peers — no configuration needed.
 
 ### MCP Tools
 
-The plugin exposes 7 MCP tools through its built-in server:
-
 | Tool | Description |
 |------|-------------|
-| `burrow_serve` | Start a registry server on a given port |
-| `burrow_connect` | Connect to a registry as a named peer |
+| `burrow_connect` | Connect to registry (default: `wss://reg.ai-smith.net`) |
 | `burrow_list_peers` | List all peers connected to the registry |
 | `burrow_send_message` | Send a text message to a peer |
 | `burrow_send_file` | Transfer a file to a peer |
 | `burrow_open_tunnel` | Open a TCP port tunnel through the relay |
+| `burrow_serve` | Start a local registry server |
 | `burrow_disconnect` | Disconnect from the registry |
 
 ### Skills
 
 | Skill | Description |
 |-------|-------------|
-| `connect` | Guided workflow to connect to a registry |
-| `swarm-status` | Show peer connectivity and tunnel status |
+| `connect` | Guided workflow to connect to the swarm |
+| `swarm-status` | Show peer connectivity and network status |
 
 ### Agent
 
-The plugin registers a **burrow-agent** (cyan-colored, sonnet model) that can autonomously manage peer connections, relay messages, and coordinate multi-agent swarms over the network.
+The plugin registers a **burrow-agent** (cyan, sonnet model) that autonomously manages peer connections, relays messages, transfers files, and coordinates multi-agent swarms.
 
 ### Hooks
 
 | Hook | Trigger | Purpose |
 |------|---------|---------|
-| SessionStart | Session begins | Injects capability awareness so the agent knows burrow is available |
-| PreToolUse | `burrow_open_tunnel` called | Tunnel safety check -- validates port ranges and confirms intent before opening tunnels |
+| SessionStart | Session begins | Auto-connects to `wss://reg.ai-smith.net` |
+| PreToolUse | `burrow_open_tunnel` | Validates port ranges before opening tunnels |
 
 ## Programmatic Usage
-
-Use burrow directly from Python:
 
 ```python
 import asyncio
 from burrow.peer import Peer
 
 async def main():
-    peer = Peer("ws://localhost:7654", name="my-agent")
+    peer = Peer("wss://reg.ai-smith.net", "my-agent")
     await peer.connect()
+    print(f"Connected as {peer.name} ({peer.id})")
 
-    # List other connected peers
-    peers = await peer.list_peers()
-    print(peers)
+    await peer.request_peers()
+    await asyncio.sleep(0.3)
+    print(f"Online: {peer.peers}")
 
-    # Send a message
-    await peer.send_message("other-peer", "hello from Python")
+    await peer.send_message("other-agent", "hello")
+    await peer.send_file("other-agent", "/path/to/data.csv")
+    await peer.open_tunnel("other-agent", 8080, 3000)
 
-    # Transfer a file
-    await peer.send_file("other-peer", "/path/to/data.csv")
-
-    # Open a tunnel (local:8080 -> remote:3000)
-    await peer.open_tunnel("other-peer", 8080, 3000)
-
-    await peer.disconnect()
+    await peer.ws.close()
 
 asyncio.run(main())
 ```
 
 ## Protocol
 
-All messages are JSON objects sent over a WebSocket connection. Every message contains a `type` field.
+All messages are JSON objects over WebSocket. Every message has a `type` field.
 
 | Type | Direction | Description |
 |------|-----------|-------------|
@@ -175,40 +177,33 @@ Protocol version: `0.2.0`
                                    v
 ┌──────────┐   WebSocket   ┌──────────────┐   WebSocket   ┌──────────┐
 │  Peer A  │ <==========>  │   Registry   │  <===========> │  Peer B  │
-│ (agent)  │               │  (relay srv) │               │ (device) │
+│ (agent)  │               │ reg.ai-smith │               │ (device) │
 └──────────┘               └──────────────┘               └──────────┘
+                            wss:// via CF
+                              tunnel
 ```
 
-All traffic flows through the registry relay. No direct peer connections are needed. This means burrow works through NAT and firewalls without any port forwarding.
-
-When used as a Claude Code plugin, the MCP server sits above the peer layer, translating tool calls into peer operations against the registry.
+All traffic flows through the registry relay at `wss://reg.ai-smith.net` (Cloudflare tunnel → localhost:7654). No direct peer connections needed. Works through NAT and firewalls without any port forwarding.
 
 ## Development
-
-### Setup
 
 ```bash
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-```
-
-### Testing
-
-```bash
-pytest tests/ -v
+uv run pytest tests/ -v   # 55 tests
 ```
 
 ### Building standalone binaries
 
 ```bash
 uv pip install -e ".[build]"
-pyinstaller --onefile --name burrow burrow/cli.py
+uv run pyinstaller --onefile --name burrow burrow/__main__.py
 ```
 
 ### Dependencies
 
-- `websockets>=12.0` -- WebSocket client/server
-- `mcp>=1.0` -- Model Context Protocol server (plugin mode)
+- `websockets>=12.0` — WebSocket client/server
+- `mcp>=1.0` — Model Context Protocol server (plugin mode)
 
 ## License
 

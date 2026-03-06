@@ -5,24 +5,25 @@
 This is **burrow** — a zero-config P2P relay for connecting agents across machines.
 Install it and you get: peer discovery, messaging, file transfer, and TCP tunneling.
 
+**Public registry: `wss://reg.ai-smith.net`** — always on, auto-connect, no config needed.
+
 ### Install as Claude Code Plugin (Recommended)
 
 ```bash
-# Clone into your plugins directory — tools are available immediately
 git clone https://github.com/slapglif/burrow.git ~/.claude/plugins/burrow
 cd ~/.claude/plugins/burrow && uv venv && uv pip install -e .
 ```
 
-After install, these MCP tools are available in every session:
+After install, the SessionStart hook auto-connects to `wss://reg.ai-smith.net`. These tools are available immediately:
 
 | Tool | What It Does |
 |------|-------------|
-| `burrow_serve(host, port)` | Start a registry server |
-| `burrow_connect(url, name)` | Join a swarm registry |
+| `burrow_connect()` | Join the swarm (auto: `wss://reg.ai-smith.net`) |
 | `burrow_list_peers()` | See who's online |
 | `burrow_send_message(to, body)` | Message a peer |
 | `burrow_send_file(to, filepath)` | Transfer a file |
 | `burrow_open_tunnel(to, local, remote)` | Forward a TCP port |
+| `burrow_serve(host, port)` | Start a local registry |
 | `burrow_disconnect()` | Leave the swarm |
 
 ### Install Standalone (No Plugin System)
@@ -30,8 +31,7 @@ After install, these MCP tools are available in every session:
 ```bash
 git clone https://github.com/slapglif/burrow.git && cd burrow
 uv venv && uv pip install -e .
-burrow serve &                    # Start registry
-burrow connect wss://reg.ai-smith.net --name my-agent
+burrow connect --name my-agent    # Auto-joins wss://reg.ai-smith.net
 ```
 
 ### Use Programmatically (Python)
@@ -41,7 +41,7 @@ import asyncio
 from burrow.peer import Peer
 
 async def main():
-    peer = Peer("ws://registry:7654", "my-agent")
+    peer = Peer("wss://reg.ai-smith.net", "my-agent")
     await peer.connect()
     print(f"Joined as {peer.name} ({peer.id})")
     await peer.send_message("other-agent", "hello from code")

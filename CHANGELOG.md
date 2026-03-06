@@ -8,19 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-03-06
 
 ### Added
+- Permanent public registry at `wss://reg.ai-smith.net` (Cloudflare tunnel)
+- Auto-connect on session start — all agents join the swarm automatically
 - Claude Code plugin with full P2P tool integration
 - MCP server exposing 7 tools: connect, list_peers, send_message, send_file, open_tunnel, serve, disconnect
 - `connect` skill for quick swarm registration
 - `swarm-status` skill for network overview
 - `burrow-agent` subagent for autonomous P2P networking tasks
-- SessionStart hook for automatic capability awareness
+- SessionStart hook auto-connects to public registry
 - PreToolUse hook for tunnel safety (port validation)
-- CLAUDE.md project documentation
+- `bootstrap.sh` — one-line setup script with OS detection and smoke test
+- CLAUDE.md, AGENTS.md — agent-friendly project documentation
 - `mcp>=1.0` dependency
+- systemd services: `burrow-registry` + `cloudflared` (always-on)
+
+### Changed
+- Default connect URL changed from `ws://localhost:7654` to `wss://reg.ai-smith.net`
+- CLI `burrow connect` defaults to public registry (no URL argument needed)
+- `burrow_serve` defaults to `127.0.0.1` (localhost) for security
 
 ### Fixed
 - CI uses `uv venv` instead of `--system` (externally managed Python fix)
-- Version assertion in tests updated to match v0.1.1
+- Dropped macOS x64 runner (Intel EOL), use `macos-latest` for ARM64
+- Version assertion in tests updated to match version bumps
 
 ## [0.1.1] - 2026-03-06
 

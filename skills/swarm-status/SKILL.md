@@ -13,11 +13,11 @@ Show the current state of the burrow P2P swarm connection.
 
 2. Present a clear status summary:
    - Connection status (connected/disconnected)
+   - Registry: `wss://reg.ai-smith.net`
    - Your peer name and ID
-   - Registry URL
    - Online peers (name and ID for each)
    - Peer count
 
-3. If disconnected, suggest using the `connect` skill or `burrow_connect` tool.
+3. If disconnected, call `burrow_connect()` to auto-join the public registry at `wss://reg.ai-smith.net`, then list peers again.
 
 4. Format output as a clean, readable summary — not raw JSON.
