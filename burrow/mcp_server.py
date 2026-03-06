@@ -18,7 +18,7 @@ _server_task: asyncio.Task | None = None
 
 
 @mcp.tool()
-async def burrow_serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT) -> str:
+async def burrow_serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> str:
     """Start a burrow registry server in the background."""
     global _server_task
     if _server_task and not _server_task.done():

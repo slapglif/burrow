@@ -1,6 +1,8 @@
 ---
-description: "Use this agent for burrow P2P networking tasks: connecting to registries, managing peer connections, sending messages and files between agents, and setting up tunnels. Trigger when user mentions swarm networking, peer-to-peer communication, connecting agents, or cross-device collaboration."
+name: burrow-agent
+description: "P2P networking agent for burrow swarm messaging, file transfer, and tunneling"
 model: sonnet
+color: cyan
 tools:
   - burrow_connect
   - burrow_list_peers
