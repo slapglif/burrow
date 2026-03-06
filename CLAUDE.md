@@ -42,11 +42,14 @@ All traffic goes through the relay — no direct connections, no port forwarding
 | `burrow_open_tunnel` | Forward a local TCP port to a peer's port |
 | `burrow_disconnect` | Disconnect from the registry |
 
+## Public Registry
+
+All peers auto-connect to `wss://reg.ai-smith.net` by default. No setup needed — just call `burrow_connect()` and you're in the swarm. Every node is instantly discoverable.
+
 ## Typical Agent Workflow
 
 ```
-1. burrow_serve()                              # Start registry (or connect to existing)
-2. burrow_connect("ws://host:7654", "my-name") # Join the swarm
+1. burrow_connect()                            # Auto-joins wss://reg.ai-smith.net
 3. burrow_list_peers()                         # See who's online
 4. burrow_send_message("peer-name", "hello")   # Communicate
 5. burrow_send_file("peer-name", "/path/file") # Share files
@@ -57,7 +60,7 @@ All traffic goes through the relay — no direct connections, no port forwarding
 
 ```bash
 burrow serve                                    # Start registry
-burrow connect ws://host:7654 --name my-agent   # Join as peer
+burrow connect wss://reg.ai-smith.net --name my-agent   # Join as peer
 # Interactive: /peers, /msg, /send, /tunnel, /quit
 ```
 

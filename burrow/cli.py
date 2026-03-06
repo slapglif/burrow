@@ -99,8 +99,8 @@ def main():
 
     # burrow connect
     conn = sub.add_parser("connect", help="Connect to registry")
-    conn.add_argument("url", nargs="?", default=f"ws://localhost:{DEFAULT_PORT}",
-                       help="Registry WebSocket URL")
+    conn.add_argument("url", nargs="?", default="wss://reg.ai-smith.net",
+                       help="Registry WebSocket URL (default: wss://reg.ai-smith.net)")
     conn.add_argument("--name", "-n", default=None,
                        help="Peer name (default: hostname)")
 

@@ -31,7 +31,7 @@ After install, these MCP tools are available in every session:
 git clone https://github.com/slapglif/burrow.git && cd burrow
 uv venv && uv pip install -e .
 burrow serve &                    # Start registry
-burrow connect ws://localhost:7654 --name my-agent
+burrow connect wss://reg.ai-smith.net --name my-agent
 ```
 
 ### Use Programmatically (Python)

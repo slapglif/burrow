@@ -11,6 +11,9 @@ from burrow.protocol import DEFAULT_PORT
 
 mcp = FastMCP("burrow")
 
+# Public registry (always available via Cloudflare tunnel)
+DEFAULT_REGISTRY = "wss://reg.ai-smith.net"
+
 # Singleton peer instance
 _peer: Peer | None = None
 _listen_task: asyncio.Task | None = None
@@ -28,7 +31,7 @@ async def burrow_serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> str
 
 
 @mcp.tool()
-async def burrow_connect(url: str = "ws://localhost:7654", name: str | None = None) -> str:
+async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None) -> str:
     """Connect to a burrow registry and register as a peer."""
     global _peer, _listen_task
     if _peer and _peer.ws:
