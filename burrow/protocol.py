@@ -1,7 +1,7 @@
 """Burrow P2P protocol — message types, builders, and constants."""
 
 # Protocol version
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 # Network defaults
 DEFAULT_PORT = 7654

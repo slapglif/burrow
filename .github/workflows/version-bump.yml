@@ -1,0 +1,28 @@
+name: Version Bump
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version (e.g., 0.2.0)"
+        required: true
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bump versions
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          sed -i "s/^__version__ = .*/__version__ = \"$VERSION\"/" burrow/__init__.py
+          sed -i "s/^VERSION = .*/VERSION = \"$VERSION\"/" burrow/protocol.py
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release: v${{ github.event.inputs.version }}"
+          git tag "v${{ github.event.inputs.version }}"
+          git push origin master --tags

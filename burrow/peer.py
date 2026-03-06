@@ -3,7 +3,6 @@
 import asyncio
 import json
 import base64
-import os
 import uuid
 from pathlib import Path
 
@@ -43,6 +42,20 @@ class Peer:
 
     async def listen(self):
         """Main receive loop — dispatch incoming messages by type."""
+        try:
+            await self._listen_loop()
+        finally:
+            self._cleanup()
+
+    def _cleanup(self):
+        """Clean up transfers and tunnels on disconnect."""
+        self._transfers.clear()
+        for tunnel in self._tunnels.values():
+            if tunnel.get("writer"):
+                tunnel["writer"].close()
+        self._tunnels.clear()
+
+    async def _listen_loop(self):
         async for raw in self.ws:
             data = json.loads(raw)
             kind = data.get("type")
@@ -62,11 +75,11 @@ class Peer:
                 print(f"- {name} left")
 
             elif kind == protocol.PEERS:
-                raw = data.get("peers", [])
-                if isinstance(raw, list):
-                    self.peers = {p["id"]: p["name"] for p in raw}
+                peer_list = data.get("peers", [])
+                if isinstance(peer_list, list):
+                    self.peers = {p["id"]: p["name"] for p in peer_list}
                 else:
-                    self.peers = raw
+                    self.peers = peer_list
 
             elif kind == protocol.FILE_START:
                 tid = data["transfer_id"]
@@ -114,6 +127,7 @@ class Peer:
                 tunnel = self._tunnels.pop(tid, None)
                 if tunnel and tunnel.get("writer"):
                     tunnel["writer"].close()
+                    await tunnel["writer"].wait_closed()
 
             elif kind == protocol.ERROR:
                 print(f"Error: {data.get('message', '?')}")
@@ -204,6 +218,7 @@ class Peer:
             tunnel = self._tunnels.pop(tunnel_id, None)
             if tunnel and tunnel.get("writer"):
                 tunnel["writer"].close()
+                await tunnel["writer"].wait_closed()
 
     async def _handle_tunnel_open(self, data: dict):
         """Respond to an incoming tunnel request by connecting locally."""

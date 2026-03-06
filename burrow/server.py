@@ -48,9 +48,7 @@ async def handler(ws):
             match t:
                 case "register":
                     name = msg.get("name", peer_id)
-                    # Reject duplicate names
-                    existing = [v["name"] for v in peers.values()]
-                    if name in existing:
+                    if any(v["name"] == name for v in peers.values()):
                         await ws.send(json.dumps({"type": ERROR, "message": f"name already taken: {name}"}))
                         continue
                     peers[ws] = {"id": peer_id, "name": name}

@@ -2,13 +2,12 @@
 
 import argparse
 import asyncio
-import sys
 from burrow.protocol import DEFAULT_PORT
 
 
 async def _ainput(prompt: str) -> str:
     """Async stdin input using executor (no extra deps)."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: input(prompt))
 
 
