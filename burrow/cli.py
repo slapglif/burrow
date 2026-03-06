@@ -56,7 +56,6 @@ async def interactive(peer):
             target = parts[1]
             local_p, remote_p = parts[2].split(":", 1)
             await peer.open_tunnel(target, int(local_p), int(remote_p))
-            print(f"  tunnel {local_p} -> {target}:{remote_p}")
 
         elif line in ("/quit", "/q", "/exit"):
             print("bye.")

@@ -86,9 +86,13 @@ class Peer:
                 if data.get("final"):
                     raw_bytes = b"".join(base64.b64decode(c) for c in entry["chunks"])
                     RECEIVE_DIR.mkdir(parents=True, exist_ok=True)
-                    dest = RECEIVE_DIR / entry["name"]
+                    # Sanitise filename: strip path separators to prevent traversal
+                    safe_name = Path(entry["name"]).name
+                    if not safe_name:
+                        safe_name = f"unnamed-{tid}"
+                    dest = RECEIVE_DIR / safe_name
                     dest.write_bytes(raw_bytes)
-                    print(f"Received file {entry['name']} from {entry['from_name']}")
+                    print(f"Received file {safe_name} from {entry['from_name']}")
                     if self.on_file:
                         self.on_file(entry["from_name"], str(dest))
                     del self._transfers[tid]
