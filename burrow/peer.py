@@ -84,7 +84,7 @@ class Peer:
                     continue
                 entry["chunks"].append(data["data"])
                 if data.get("final"):
-                    raw_bytes = base64.b64decode("".join(entry["chunks"]))
+                    raw_bytes = b"".join(base64.b64decode(c) for c in entry["chunks"])
                     RECEIVE_DIR.mkdir(parents=True, exist_ok=True)
                     dest = RECEIVE_DIR / entry["name"]
                     dest.write_bytes(raw_bytes)
@@ -94,7 +94,7 @@ class Peer:
                     del self._transfers[tid]
 
             elif kind == protocol.TUNNEL_OPEN:
-                asyncio.ensure_future(
+                asyncio.create_task(
                     self._handle_tunnel_open(data)
                 )
 
@@ -159,7 +159,7 @@ class Peer:
             tid = uuid.uuid4().hex[:8]
             self._tunnels[tid] = {"reader": reader, "writer": writer}
             await self._send(protocol.tunnel_open(target, tid, remote_port))
-            asyncio.ensure_future(self._relay_tcp_to_ws(tid, target, reader))
+            asyncio.create_task(self._relay_tcp_to_ws(tid, target, reader))
 
         server = await asyncio.start_server(on_tcp_connect, "127.0.0.1", local_port)
         print(f"Tunnel listening on 127.0.0.1:{local_port} -> {to}:{remote_port}")
@@ -217,4 +217,4 @@ class Peer:
         await self._send(protocol.tunnel_accept(from_id, tid))
 
         # Relay local TCP back over WebSocket
-        asyncio.ensure_future(self._relay_tcp_to_ws(tid, from_id, reader))
+        asyncio.create_task(self._relay_tcp_to_ws(tid, from_id, reader))
