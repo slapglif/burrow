@@ -10,9 +10,13 @@ Install it and you get: peer discovery, messaging, file transfer, and TCP tunnel
 ### Install as Claude Code Plugin (Recommended)
 
 ```bash
-git clone https://github.com/slapglif/burrow.git ~/.claude/plugins/burrow
-cd ~/.claude/plugins/burrow && uv venv && uv pip install -e .
+git clone https://github.com/slapglif/burrow.git && cd burrow
+bash scripts/install-plugin.sh   # Handles everything automatically
 ```
+
+This script dynamically discovers all paths, creates the venv, installs deps, symlinks into
+the plugins directory, registers in `installed_plugins.json`, enables in `settings.json`,
+and verifies MCP + registry connectivity. Run it again to fix any issues.
 
 After install, the SessionStart hook auto-connects to `wss://reg.ai-smith.net`. These tools are available immediately:
 

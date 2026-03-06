@@ -308,3 +308,15 @@ if [ "$SMOKE_OK" = false ]; then
     warn "Smoke test had issues — check output above"
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# 9. Auto-install Claude Code plugin (if claude is available)
+# ---------------------------------------------------------------------------
+if command -v claude >/dev/null 2>&1 || [ -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ]; then
+    step "Installing as Claude Code plugin..."
+    if [ -f "$BURROW_DIR/scripts/install-plugin.sh" ]; then
+        bash "$BURROW_DIR/scripts/install-plugin.sh"
+    else
+        warn "install-plugin.sh not found — skipping plugin registration"
+    fi
+fi

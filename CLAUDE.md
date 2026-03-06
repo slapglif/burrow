@@ -15,12 +15,15 @@ git clone https://github.com/slapglif/burrow.git && cd burrow
 uv venv && uv pip install -e .
 ```
 
-### As a Claude Code Plugin
+### As a Claude Code Plugin (Automated)
 ```bash
-git clone https://github.com/slapglif/burrow.git ~/.claude/plugins/burrow
-cd ~/.claude/plugins/burrow && uv venv && uv pip install -e .
+git clone https://github.com/slapglif/burrow.git && cd burrow
+bash scripts/install-plugin.sh
 ```
+This handles everything: venv, deps, symlink, registration, enablement, verification.
 Once installed, the SessionStart hook auto-connects you to the swarm. All `burrow_*` tools are available immediately.
+
+If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` again.
 
 ## Available Tools (MCP)
 
@@ -66,6 +69,9 @@ burrow connect ws://custom:7654 --name my-agent # Custom registry
 | `.mcp.json` | MCP server config |
 | `skills/connect/` | Quick-connect skill |
 | `skills/swarm-status/` | Network status skill |
+| `skills/install/` | Automated plugin installation |
+| `skills/doctor/` | Diagnose and fix issues |
+| `scripts/install-plugin.sh` | One-command plugin installer |
 | `agents/burrow-agent.md` | Autonomous networking agent |
 | `hooks/hooks.json` | Auto-connect + tunnel safety hooks |
 
