@@ -15,10 +15,7 @@ jobs:
           - os: ubuntu-latest
             target: linux-x64
             ext: ""
-          - os: macos-13
-            target: macos-x64
-            ext: ""
-          - os: macos-14
+          - os: macos-latest
             target: macos-arm64
             ext: ""
           - os: windows-latest
