@@ -1,6 +1,7 @@
 """Burrow P2P MCP server — exposes peer capabilities as tools for Claude Code agents."""
 
 import asyncio
+import os
 import socket
 
 from mcp.server.fastmcp import FastMCP
@@ -11,14 +12,14 @@ from burrow.protocol import DEFAULT_PORT
 
 mcp = FastMCP("burrow")
 
-# Public registry (always available via Cloudflare tunnel)
 DEFAULT_REGISTRY = "wss://reg.ai-smith.net"
 
-# Singleton peer instance
 _peer: Peer | None = None
 _listen_task: asyncio.Task | None = None
 _server_task: asyncio.Task | None = None
 
+
+# ── Core ────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def burrow_serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> str:
@@ -31,50 +32,87 @@ async def burrow_serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> str
 
 
 @mcp.tool()
-async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None) -> str:
-    """Connect to a burrow registry and register as a peer."""
+async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
+                          token: str | None = None) -> str:
+    """Connect to a burrow registry and register as a peer.
+    Provide token if the server requires authentication.
+    Auto-reconnects on connection loss."""
     global _peer, _listen_task
     if _peer and _peer.ws:
         return f"Already connected as '{_peer.name}' (id={_peer.id}). Disconnect first."
     if name is None:
         name = socket.gethostname()
-    _peer = Peer(url, name)
+    if token is None:
+        token = os.environ.get("BURROW_TOKEN")
+    _peer = Peer(url, name, token=token, auto_reconnect=True)
     try:
         await _peer.connect()
     except Exception as exc:
         _peer = None
         return f"Connection failed: {exc}"
-    _listen_task = asyncio.create_task(_peer.listen())
+    _listen_task = asyncio.create_task(_peer.run())
     peer_count = len(_peer.peers)
     return f"Connected to {url} as '{_peer.name}' (id={_peer.id}). {peer_count} other peer(s) online."
 
 
 @mcp.tool()
+async def burrow_disconnect() -> str:
+    """Disconnect from the burrow registry."""
+    global _peer, _listen_task
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    name = _peer.name
+    await _peer.stop()
+    _peer = None
+    _listen_task = None
+    return f"Disconnected '{name}' from registry."
+
+
+@mcp.tool()
 async def burrow_list_peers() -> str:
-    """List all peers currently connected to the registry."""
+    """List all peers currently connected to the registry, including their status and capabilities."""
     if not _peer or not _peer.ws:
         return "Not connected. Call burrow_connect first."
     try:
         await _peer.request_peers()
-        await asyncio.sleep(0.3)  # brief wait for the PEERS response
     except Exception as exc:
         return f"Failed to request peers: {exc}"
     if not _peer.peers:
         return "No other peers online."
-    lines = [f"  {pid}: {pname}" for pid, pname in _peer.peers.items()]
+    lines = []
+    for pid, pname in _peer.peers.items():
+        status = _peer.peer_status.get(pid, {}).get("status", "?")
+        task = _peer.peer_status.get(pid, {}).get("task", "")
+        caps = _peer.peer_capabilities.get(pid, {})
+        cap_str = ""
+        if caps:
+            skills = caps.get("skills", [])
+            tools = caps.get("tools", [])
+            if skills:
+                cap_str += f" skills={skills}"
+            if tools:
+                cap_str += f" tools={tools}"
+        task_str = f" ({task})" if task else ""
+        lines.append(f"  {pname} ({pid}) [{status}{task_str}]{cap_str}")
     return f"{len(lines)} peer(s) online:\n" + "\n".join(lines)
 
 
+# ── Messaging ───────────────────────────────────────────────────────────────
+
 @mcp.tool()
 async def burrow_send_message(to: str, body: str) -> str:
-    """Send a text message to a peer by name or id."""
+    """Send a text message to a peer by name or id. Returns delivery status."""
     if not _peer or not _peer.ws:
         return "Not connected. Call burrow_connect first."
     try:
-        await _peer.send_message(to, body)
+        result = await _peer.send_message(to, body)
     except Exception as exc:
         return f"Failed to send message: {exc}"
-    return f"Message sent to '{to}'."
+    if result == "delivered":
+        return f"Message delivered to '{to}'."
+    elif result == "queued":
+        return f"'{to}' is offline. Message queued for delivery when they reconnect."
+    return f"Message to '{to}': {result}"
 
 
 @mcp.tool()
@@ -103,22 +141,252 @@ async def burrow_open_tunnel(to: str, local_port: int, remote_port: int) -> str:
     return f"Tunnel open: localhost:{local_port} -> {to}:{remote_port}"
 
 
+# ── Capabilities & Presence ─────────────────────────────────────────────────
+
 @mcp.tool()
-async def burrow_disconnect() -> str:
-    """Disconnect from the burrow registry."""
-    global _peer, _listen_task
+async def burrow_announce_capabilities(
+    tools: str = "", model: str = "", skills: str = "",
+    tags: str = "", status: str = "idle"
+) -> str:
+    """Announce this agent's capabilities to the swarm.
+    Comma-separated lists for tools, skills, tags."""
     if not _peer or not _peer.ws:
         return "Not connected."
-    name = _peer.name
+    caps = {"status": status}
+    if tools:
+        caps["tools"] = [t.strip() for t in tools.split(",")]
+    if model:
+        caps["model"] = model
+    if skills:
+        caps["skills"] = [s.strip() for s in skills.split(",")]
+    if tags:
+        caps["tags"] = [t.strip() for t in tags.split(",")]
+    await _peer.announce_capabilities(caps)
+    return f"Capabilities announced: {caps}"
+
+
+@mcp.tool()
+async def burrow_find_peers(
+    required_tools: str = "", required_skills: str = "", required_tags: str = ""
+) -> str:
+    """Find peers matching capability requirements. Comma-separated lists."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    tools = [t.strip() for t in required_tools.split(",") if t.strip()] or None
+    skills = [s.strip() for s in required_skills.split(",") if s.strip()] or None
+    tags = [t.strip() for t in required_tags.split(",") if t.strip()] or None
+    matches = await _peer.query_capabilities(tools, skills, tags)
+    if not matches:
+        return "No matching peers found."
+    lines = []
+    for m in matches:
+        caps = m.get("capabilities", {})
+        status = m.get("status", "?")
+        lines.append(f"  {m['name']} ({m['id']}) [{status}]: {caps}")
+    return f"{len(matches)} matching peer(s):\n" + "\n".join(lines)
+
+
+@mcp.tool()
+async def burrow_update_status(status: str, task: str = "") -> str:
+    """Update presence status. Status: idle, busy, working. Task: description of current work."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    await _peer.update_status(status, task)
+    return f"Status updated: {status}" + (f" ({task})" if task else "")
+
+
+# ── Groups / Channels ──────────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_join_group(group: str) -> str:
+    """Join a named group/channel. Messages can be broadcast to all group members."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    await _peer.join_group(group)
+    return f"Joined group '{group}'."
+
+
+@mcp.tool()
+async def burrow_leave_group(group: str) -> str:
+    """Leave a group/channel."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    await _peer.leave_group(group)
+    return f"Left group '{group}'."
+
+
+@mcp.tool()
+async def burrow_group_message(group: str, body: str) -> str:
+    """Send a message to all members of a group."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
     try:
-        if _listen_task and not _listen_task.done():
-            _listen_task.cancel()
-        await _peer.ws.close()
-    except Exception:
-        pass
-    _peer = None
-    _listen_task = None
-    return f"Disconnected '{name}' from registry."
+        await _peer.send_group_message(group, body, wait_ack=True)
+    except Exception as exc:
+        return f"Failed: {exc}"
+    return f"Message sent to group '{group}'."
+
+
+@mcp.tool()
+async def burrow_list_groups() -> str:
+    """List all active groups and their member counts."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    groups = await _peer.list_groups()
+    if not groups:
+        return "No active groups."
+    lines = [f"  {name}: {count} member(s)" for name, count in groups.items()]
+    return f"{len(groups)} group(s):\n" + "\n".join(lines)
+
+
+@mcp.tool()
+async def burrow_group_members(group: str) -> str:
+    """List members of a specific group."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    members = await _peer.get_group_members(group)
+    if not members:
+        return f"No members in group '{group}' (or group doesn't exist)."
+    lines = [f"  {m['name']} ({m['id']}) [{m.get('status', '?')}]" for m in members]
+    return f"{len(members)} member(s) in '{group}':\n" + "\n".join(lines)
+
+
+# ── Shared State ────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_state_set(key: str, value: str, group: str = "") -> str:
+    """Set a shared key-value pair visible to all peers (or group members if group specified)."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    await _peer.set_state(key, value, group or None)
+    scope = f"group '{group}'" if group else "global"
+    return f"State set: {key} = {value} ({scope})"
+
+
+@mcp.tool()
+async def burrow_state_get(key: str, group: str = "") -> str:
+    """Get a shared state value by key."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    value = await _peer.get_state(key, group or None)
+    if value is None:
+        return f"Key '{key}' not found."
+    return f"{key} = {value}"
+
+
+@mcp.tool()
+async def burrow_state_sync(group: str = "") -> str:
+    """Sync all shared state from the server. Returns the full key-value store."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    state = await _peer.sync_state(group or None)
+    if not state:
+        return "No shared state."
+    lines = [f"  {k} = {v}" for k, v in state.items()]
+    scope = f"group '{group}'" if group else "global"
+    return f"Shared state ({scope}, {len(state)} keys):\n" + "\n".join(lines)
+
+
+# ── Task Coordination ───────────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_broadcast_task(task: str, timeout_s: float = 30.0,
+                                 required_skills: str = "") -> str:
+    """Broadcast a task to all peers (optionally filtered by skills) and collect responses."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    skills = [s.strip() for s in required_skills.split(",") if s.strip()] or None
+    responses = await _peer.broadcast_task(task, timeout_s, skills)
+    if not responses:
+        return "No responses received."
+    lines = [f"  {r['from']}: {r['response']}" for r in responses]
+    return f"{len(responses)} response(s):\n" + "\n".join(lines)
+
+
+@mcp.tool()
+async def burrow_delegate_task(to: str, task: str, context: str = "",
+                                timeout_s: float = 120.0) -> str:
+    """Delegate a task to a specific peer and wait for result."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    ctx = {"description": context} if context else {}
+    result = await _peer.delegate_task(to, task, context=ctx, timeout_s=timeout_s)
+    status = result.get("status", "unknown")
+    if status == "timeout":
+        return f"Task timed out after {timeout_s}s."
+    return f"Task {status}: {result.get('result', 'no result')}"
+
+
+@mcp.tool()
+async def burrow_return_result(to: str, task_id: str, result: str,
+                                success: bool = True) -> str:
+    """Return a result for a delegated task back to the assigning peer."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    await _peer.return_task_result(to, task_id, result, success)
+    return f"Result sent for task {task_id}."
+
+
+@mcp.tool()
+async def burrow_get_pending_tasks() -> str:
+    """Get pending tasks that have been assigned or broadcast to this agent."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    if not _peer.pending_tasks:
+        return "No pending tasks."
+    lines = []
+    for t in _peer.pending_tasks:
+        lines.append(f"  [{t['type']}] {t['task_id']} from {t['from_name']}: {t['task']}")
+    return f"{len(_peer.pending_tasks)} pending task(s):\n" + "\n".join(lines)
+
+
+# ── Voting / Consensus ──────────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_propose_vote(proposal: str, options: str = "approve,reject,abstain",
+                               deadline_s: float = 30.0) -> str:
+    """Propose a vote to all peers. Options are comma-separated."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    opt_list = [o.strip() for o in options.split(",")]
+    result = await _peer.propose_vote(proposal, opt_list, deadline_s)
+    tally_str = ", ".join(f"{k}: {v}" for k, v in result["tally"].items())
+    return (f"Vote complete. Outcome: {result['outcome']}\n"
+            f"Tally ({result['total']} votes): {tally_str}")
+
+
+@mcp.tool()
+async def burrow_cast_vote(to: str, vote_id: str, choice: str,
+                            reason: str = "") -> str:
+    """Cast a vote on a proposal from another peer."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    await _peer.cast_vote(to, vote_id, choice, reason)
+    return f"Vote '{choice}' cast on {vote_id}."
+
+
+# ── Leader Election ─────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_elect_leader() -> str:
+    """Trigger a leader election in the swarm. Returns the elected leader."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    result = await _peer.start_election()
+    if result["leader_id"] == _peer.id:
+        return f"This agent was elected leader (id={_peer.id})."
+    return f"Leader elected: {result['leader_name']} (id={result['leader_id']})"
+
+
+@mcp.tool()
+async def burrow_get_leader() -> str:
+    """Return the current swarm leader."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    if not _peer.leader_id:
+        return "No leader elected yet. Call burrow_elect_leader."
+    is_me = " (this agent)" if _peer.is_leader else ""
+    return f"Leader: {_peer.leader_name} (id={_peer.leader_id}){is_me}"
 
 
 def main():
