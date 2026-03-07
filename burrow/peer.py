@@ -36,7 +36,11 @@ class Peer:
         resp = json.loads(raw)
         if resp.get("type") == protocol.REGISTERED:
             self.id = resp["id"]
-            self.peers = resp.get("peers", {})
+            peer_list = resp.get("peers", [])
+            if isinstance(peer_list, list):
+                self.peers = {p["id"]: p["name"] for p in peer_list}
+            else:
+                self.peers = peer_list
         else:
             raise RuntimeError(f"Registration failed: {resp}")
 

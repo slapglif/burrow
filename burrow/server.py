@@ -53,7 +53,8 @@ async def handler(ws):
                         continue
                     peers[ws] = {"id": peer_id, "name": name}
                     by_id[peer_id] = ws
-                    await ws.send(json.dumps({"type": REGISTERED, "id": peer_id, "name": name}))
+                    others = [v for w, v in peers.items() if w is not ws]
+                    await ws.send(json.dumps({"type": REGISTERED, "id": peer_id, "name": name, "peers": others}))
                     await broadcast({"type": PEER_JOINED, "id": peer_id, "name": name}, exclude=ws)
                     print(f"+ {name} ({peer_id})")
 
