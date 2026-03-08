@@ -22,7 +22,11 @@ from burrow.protocol import (
     TASK_BROADCAST, TASK_RESPONSE, TASK_ASSIGN, TASK_STATUS, TASK_RESULT,
     VOTE_PROPOSE, VOTE_CAST, VOTE_RESULT,
     ELECTION_START, ELECTION_ALIVE, ELECTION_VICTORY,
+    JOB_SUBMIT, JOB_STATUS, JOB_RESULT, JOB_CANCEL, JOB_LIST, JOB_UPDATE,
+    QUEUE_PUSH, QUEUE_PULL, QUEUE_ACK, QUEUE_STATUS,
+    WORKER_REGISTER, WORKER_HEARTBEAT,
 )
+from burrow.distributed import BuiltinQueue
 
 # --- Server state ---
 
@@ -33,6 +37,8 @@ shared_state: dict[str, dict] = {"_global": {}}  # scope -> {key: {value, set_by
 message_queues: dict[str, collections.deque] = {}  # peer_id -> deque of (payload, timestamp)
 last_seen: dict[str, tuple] = {}    # peer_id -> (name, monotonic_time)
 name_to_id: dict[str, str] = {}    # name -> peer_id (for offline resolution)
+work_queue: BuiltinQueue = BuiltinQueue()  # server-side job queue
+job_registry: dict[str, dict] = {}  # job_id -> {submitted_by, target, runtime, status}
 
 # --- Configuration ---
 
@@ -53,6 +59,7 @@ RELAY_TYPES = {
     TUNNEL_OPEN, TUNNEL_ACCEPT, TUNNEL_DATA, TUNNEL_CLOSE,
     TASK_RESPONSE, TASK_ASSIGN, TASK_STATUS, TASK_RESULT,
     VOTE_CAST, ELECTION_ALIVE,
+    JOB_SUBMIT, JOB_STATUS, JOB_RESULT, JOB_CANCEL, JOB_UPDATE,
 }
 
 # Messages broadcast to all peers
@@ -408,6 +415,109 @@ async def handler(ws):
                     resp = {"type": STATE_SYNC, "state": state}
                     if scope != "_global":
                         resp["group"] = scope
+                    if "req_id" in msg:
+                        resp["req_id"] = msg["req_id"]
+                    await ws.send(json.dumps(resp))
+
+                # ---- Server-side work queue ----
+                case "queue_push":
+                    queue_name = msg["queue"]
+                    job_id = msg.get("job_id", os.urandom(4).hex())
+                    sender_info = peers.get(ws, {})
+                    item = work_queue.push(
+                        queue_name, job_id, msg.get("payload", {}),
+                        priority=msg.get("priority", 0),
+                        submitted_by=sender_info.get("id", peer_id),
+                    )
+                    await ws.send(json.dumps({
+                        "type": ACK, "msg_id": job_id,
+                        "queue": queue_name, "status": "queued",
+                    }))
+
+                case "queue_pull":
+                    queue_name = msg["queue"]
+                    worker_id = msg.get("worker_id", peer_id)
+                    item = work_queue.pull(queue_name, worker_id)
+                    if item:
+                        resp = {
+                            "type": QUEUE_PULL, "queue": queue_name,
+                            "job_id": item.job_id, "payload": item.payload,
+                            "priority": item.priority,
+                            "submitted_by": item.submitted_by,
+                        }
+                    else:
+                        resp = {
+                            "type": QUEUE_PULL, "queue": queue_name,
+                            "job_id": None, "payload": None,
+                        }
+                    if "req_id" in msg:
+                        resp["req_id"] = msg["req_id"]
+                    await ws.send(json.dumps(resp))
+
+                case "queue_ack":
+                    job_id = msg["job_id"]
+                    success = work_queue.ack(
+                        job_id,
+                        result=msg.get("result"),
+                        success=msg.get("success", True),
+                        error=msg.get("error"),
+                    )
+                    # Notify the submitter
+                    job_info = work_queue.get_job(job_id)
+                    if job_info and job_info["submitted_by"]:
+                        submitter_ws = by_id.get(job_info["submitted_by"])
+                        if submitter_ws:
+                            try:
+                                await submitter_ws.send(json.dumps({
+                                    "type": JOB_RESULT,
+                                    "job_id": job_id,
+                                    "status": "completed" if msg.get("success", True) else "failed",
+                                    "result": msg.get("result"),
+                                    "error": msg.get("error"),
+                                    "from": peer_id,
+                                    "from_name": peers.get(ws, {}).get("name", peer_id),
+                                }))
+                            except Exception:
+                                pass
+
+                case "queue_status":
+                    queue_name = msg.get("queue")
+                    status = work_queue.status(queue_name)
+                    resp = {"type": QUEUE_STATUS, "status": status}
+                    if "req_id" in msg:
+                        resp["req_id"] = msg["req_id"]
+                    await ws.send(json.dumps(resp))
+
+                case "worker_register":
+                    worker_id = msg.get("worker_id", peer_id)
+                    work_queue.register_worker(
+                        worker_id,
+                        queues=msg.get("queues", []),
+                        capabilities=msg.get("capabilities", {}),
+                    )
+                    await ws.send(json.dumps({
+                        "type": ACK, "msg_id": worker_id,
+                        "status": "registered",
+                    }))
+
+                case "worker_heartbeat":
+                    worker_id = msg.get("worker_id", peer_id)
+                    work_queue.worker_heartbeat(
+                        worker_id,
+                        status=msg.get("status", "idle"),
+                        current_job=msg.get("current_job"),
+                    )
+
+                # ---- Job list (server-tracked jobs) ----
+                case "job_list":
+                    jobs = []
+                    for jid, jinfo in job_registry.items():
+                        jobs.append(jinfo)
+                    # Also include queue jobs
+                    for jid, item in work_queue.jobs.items():
+                        if jid not in job_registry:
+                            jobs.append(work_queue.get_job(jid))
+                    resp = {"type": JOB_LIST, "jobs": jobs}
                     if "req_id" in msg:
                         resp["req_id"] = msg["req_id"]
                     await ws.send(json.dumps(resp))

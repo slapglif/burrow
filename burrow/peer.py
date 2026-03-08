@@ -12,6 +12,7 @@ import websockets
 from websockets.asyncio.client import connect
 
 from burrow import protocol
+from burrow.distributed import JobExecutor, JobState
 
 
 RECEIVE_DIR = Path("./burrow-received")
@@ -77,6 +78,12 @@ class Peer:
 
         # Incoming task queue (for MCP)
         self.pending_tasks = []       # [{from, task_id, task, context}]
+
+        # Distributed job execution
+        self._executor = JobExecutor()
+        self._job_results = {}        # job_id -> Future (for submitted jobs awaiting results)
+        self._job_callbacks = {}      # job_id -> callback
+        self.on_job_received = None   # (from_name, job_id, func, args, kwargs) -> auto-execute if None
 
     # --- Core lifecycle ---
 
@@ -445,6 +452,48 @@ class Peer:
                 if self.on_leader_elected:
                     self.on_leader_elected(self.leader_id, self.leader_name, self.is_leader)
 
+            # --- Distributed jobs ---
+            elif kind == protocol.JOB_SUBMIT:
+                asyncio.create_task(self._handle_job_submit(data))
+
+            elif kind == protocol.JOB_RESULT:
+                jid = data.get("job_id")
+                fut = self._job_results.pop(jid, None)
+                if fut and not fut.done():
+                    fut.set_result(data)
+
+            elif kind == protocol.JOB_UPDATE:
+                jid = data.get("job_id")
+                # Update local tracking
+                job = self._executor.jobs.get(jid)
+                if job:
+                    job.status = data.get("status", job.status)
+                    if "progress" in data:
+                        job.progress = data["progress"]
+
+            elif kind == protocol.JOB_STATUS:
+                # Someone asking us about a job status
+                jid = data.get("job_id")
+                job = self._executor.check_job(jid)
+                if job:
+                    await self._send(protocol.job_result(
+                        data.get("from", ""), jid, job.status,
+                        result=job.result, error=job.error))
+
+            elif kind == protocol.JOB_CANCEL:
+                jid = data.get("job_id")
+                self._executor.cancel_job(jid)
+
+            elif kind == protocol.JOB_LIST:
+                pass  # handled via req_id
+
+            # --- Queue responses ---
+            elif kind == protocol.QUEUE_PULL:
+                pass  # handled via req_id
+
+            elif kind == protocol.QUEUE_STATUS:
+                pass  # handled via req_id
+
             # --- Errors / keepalive ---
             elif kind == protocol.ERROR:
                 print(f"Error: {data.get('message', '?')}")
@@ -754,6 +803,176 @@ class Peer:
             except asyncio.TimeoutError:
                 pass
         return {"leader_id": self.leader_id, "leader_name": self.leader_name}
+
+    # --- Distributed job submission ---
+
+    async def submit_job(self, to: str, func: str, args: list | None = None,
+                         kwargs: dict | None = None, runtime: str = "builtin",
+                         resources: dict | None = None,
+                         timeout: float = 120.0) -> dict:
+        """Submit a job to a remote peer and wait for result."""
+        job_id = uuid.uuid4().hex[:8]
+        target = self._resolve(to)
+        fut = asyncio.get_running_loop().create_future()
+        self._job_results[job_id] = fut
+        await self._send(protocol.job_submit(
+            target, job_id, runtime, func,
+            args=args, kwargs=kwargs, resources=resources))
+        try:
+            result = await asyncio.wait_for(fut, timeout)
+            return result
+        except asyncio.TimeoutError:
+            return {"job_id": job_id, "status": "timeout"}
+        finally:
+            self._job_results.pop(job_id, None)
+
+    async def check_job_status(self, to: str, job_id: str,
+                                timeout: float = 5.0) -> dict:
+        """Query a remote peer for job status."""
+        req_id = uuid.uuid4().hex[:8]
+        target = self._resolve(to)
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_requests[req_id] = fut
+        msg = protocol.job_status(target, job_id, req_id=req_id)
+        await self._send(msg)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            return {"job_id": job_id, "status": "unknown"}
+        finally:
+            self._pending_requests.pop(req_id, None)
+
+    async def cancel_job(self, to: str, job_id: str):
+        """Cancel a job on a remote peer."""
+        target = self._resolve(to)
+        await self._send(protocol.job_cancel(target, job_id))
+
+    async def list_all_jobs(self, timeout: float = 5.0) -> list[dict]:
+        """List all jobs tracked by the server."""
+        req_id = uuid.uuid4().hex[:8]
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_requests[req_id] = fut
+        msg = protocol.job_list(req_id=req_id)
+        await self._send(msg)
+        try:
+            response = await asyncio.wait_for(fut, timeout)
+            return response.get("jobs", [])
+        except asyncio.TimeoutError:
+            return []
+        finally:
+            self._pending_requests.pop(req_id, None)
+
+    def init_ray(self, address: str | None = None) -> bool:
+        """Initialize local Ray runtime."""
+        return self._executor.init_ray(address)
+
+    def init_dask(self, scheduler: str | None = None) -> bool:
+        """Initialize local Dask runtime."""
+        return self._executor.init_dask(scheduler)
+
+    @property
+    def available_runtimes(self) -> list[str]:
+        return self._executor.available_runtimes
+
+    async def _handle_job_submit(self, data: dict):
+        """Execute a job submitted by another peer."""
+        job_id = data["job_id"]
+        runtime = data.get("runtime", "builtin")
+        func = data["func"]
+        args = data.get("args", [])
+        kwargs = data.get("kwargs", {})
+        from_id = data.get("from", "")
+        from_name = data.get("from_name", "?")
+
+        if self.on_job_received:
+            self.on_job_received(from_name, job_id, func, args, kwargs)
+            return
+
+        try:
+            job = await self._executor.submit(
+                job_id, runtime, func, args=args, kwargs=kwargs,
+                submitted_by=from_id)
+
+            # Wait for completion and send result back
+            for _ in range(1200):  # up to 120 seconds
+                await asyncio.sleep(0.1)
+                self._executor.check_job(job_id)
+                if job.status in (JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED):
+                    break
+
+            await self._send(protocol.job_result(
+                from_id, job_id, job.status,
+                result=job.result, error=job.error))
+        except Exception as e:
+            await self._send(protocol.job_result(
+                from_id, job_id, "failed", error=str(e)))
+
+    # --- Server-side queue ---
+
+    async def queue_push(self, queue_name: str, payload: dict,
+                         priority: int = 0) -> str:
+        """Push a job to the server-side work queue."""
+        job_id = uuid.uuid4().hex[:8]
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_acks[job_id] = fut
+        await self._send(protocol.queue_push(queue_name, job_id, payload, priority))
+        try:
+            await asyncio.wait_for(fut, 5.0)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self._pending_acks.pop(job_id, None)
+        return job_id
+
+    async def queue_pull(self, queue_name: str, timeout: float = 5.0) -> dict | None:
+        """Pull the next job from the server-side work queue."""
+        req_id = uuid.uuid4().hex[:8]
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_requests[req_id] = fut
+        msg = protocol.queue_pull(queue_name, worker_id=self.id)
+        msg["req_id"] = req_id
+        await self._send(msg)
+        try:
+            response = await asyncio.wait_for(fut, timeout)
+            if response.get("job_id"):
+                return response
+            return None
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._pending_requests.pop(req_id, None)
+
+    async def queue_ack(self, queue_name: str, job_id: str, result=None,
+                        success: bool = True, error: str | None = None):
+        """Acknowledge completion of a queue job."""
+        await self._send(protocol.queue_ack(queue_name, job_id, result, success, error))
+
+    async def queue_status(self, queue_name: str | None = None,
+                           timeout: float = 5.0) -> dict:
+        """Get status of server-side work queues."""
+        req_id = uuid.uuid4().hex[:8]
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_requests[req_id] = fut
+        msg = protocol.queue_status(queue_name, req_id=req_id)
+        await self._send(msg)
+        try:
+            response = await asyncio.wait_for(fut, timeout)
+            return response.get("status", {})
+        except asyncio.TimeoutError:
+            return {}
+        finally:
+            self._pending_requests.pop(req_id, None)
+
+    async def register_worker(self, queues: list[str] | None = None,
+                               capabilities: dict | None = None):
+        """Register as a worker for server-side queues."""
+        await self._send(protocol.worker_register(
+            self.id, queues=queues, capabilities=capabilities))
+
+    async def worker_heartbeat(self, status: str = "idle",
+                                current_job: str | None = None):
+        """Send a heartbeat to the server."""
+        await self._send(protocol.worker_heartbeat(self.id, status, current_job))
 
     # --- Internal helpers ---
 

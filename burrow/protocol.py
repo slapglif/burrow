@@ -1,7 +1,7 @@
 """Burrow P2P protocol — message types, builders, and constants."""
 
 # Protocol version
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # Network defaults
 DEFAULT_PORT = 7654
@@ -71,6 +71,22 @@ VOTE_RESULT = "vote_result"
 ELECTION_START = "election_start"
 ELECTION_ALIVE = "election_alive"
 ELECTION_VICTORY = "election_victory"
+
+# Distributed jobs (Ray / Dask / built-in queue)
+JOB_SUBMIT = "job_submit"
+JOB_STATUS = "job_status"
+JOB_RESULT = "job_result"
+JOB_CANCEL = "job_cancel"
+JOB_LIST = "job_list"
+JOB_UPDATE = "job_update"
+
+# Built-in work queue
+QUEUE_PUSH = "queue_push"
+QUEUE_PULL = "queue_pull"
+QUEUE_ACK = "queue_ack"
+QUEUE_STATUS = "queue_status"
+WORKER_REGISTER = "worker_register"
+WORKER_HEARTBEAT = "worker_heartbeat"
 
 
 # --- Builder functions ---
@@ -305,3 +321,103 @@ def election_alive(to: str, election_id: str) -> dict:
 
 def election_victory(election_id: str) -> dict:
     return {"type": ELECTION_VICTORY, "election_id": election_id}
+
+
+# Distributed jobs
+
+def job_submit(to: str, job_id: str, runtime: str, func: str, args: list | None = None,
+               kwargs: dict | None = None, resources: dict | None = None) -> dict:
+    """Submit a job to a peer. runtime: 'ray', 'dask', or 'builtin'."""
+    return {"type": JOB_SUBMIT, "to": to, "job_id": job_id, "runtime": runtime,
+            "func": func, "args": args or [], "kwargs": kwargs or {},
+            "resources": resources or {}}
+
+
+def job_status(to: str, job_id: str, req_id: str | None = None) -> dict:
+    d = {"type": JOB_STATUS, "to": to, "job_id": job_id}
+    if req_id:
+        d["req_id"] = req_id
+    return d
+
+
+def job_result(to: str, job_id: str, status: str, result=None,
+               error: str | None = None) -> dict:
+    d = {"type": JOB_RESULT, "to": to, "job_id": job_id, "status": status}
+    if result is not None:
+        d["result"] = result
+    if error:
+        d["error"] = error
+    return d
+
+
+def job_cancel(to: str, job_id: str) -> dict:
+    return {"type": JOB_CANCEL, "to": to, "job_id": job_id}
+
+
+def job_list(req_id: str | None = None) -> dict:
+    d = {"type": JOB_LIST}
+    if req_id:
+        d["req_id"] = req_id
+    return d
+
+
+def job_update(to: str, job_id: str, status: str, progress: float | None = None,
+               result=None, error: str | None = None) -> dict:
+    d = {"type": JOB_UPDATE, "to": to, "job_id": job_id, "status": status}
+    if progress is not None:
+        d["progress"] = progress
+    if result is not None:
+        d["result"] = result
+    if error:
+        d["error"] = error
+    return d
+
+
+# Built-in work queue
+
+def queue_push(queue_name: str, job_id: str, payload: dict,
+               priority: int = 0) -> dict:
+    return {"type": QUEUE_PUSH, "queue": queue_name, "job_id": job_id,
+            "payload": payload, "priority": priority}
+
+
+def queue_pull(queue_name: str, worker_id: str | None = None) -> dict:
+    d = {"type": QUEUE_PULL, "queue": queue_name}
+    if worker_id:
+        d["worker_id"] = worker_id
+    return d
+
+
+def queue_ack(queue_name: str, job_id: str, result=None,
+              success: bool = True, error: str | None = None) -> dict:
+    d = {"type": QUEUE_ACK, "queue": queue_name, "job_id": job_id,
+         "success": success}
+    if result is not None:
+        d["result"] = result
+    if error:
+        d["error"] = error
+    return d
+
+
+def queue_status(queue_name: str | None = None,
+                 req_id: str | None = None) -> dict:
+    d = {"type": QUEUE_STATUS}
+    if queue_name:
+        d["queue"] = queue_name
+    if req_id:
+        d["req_id"] = req_id
+    return d
+
+
+def worker_register(worker_id: str, queues: list[str] | None = None,
+                     capabilities: dict | None = None) -> dict:
+    return {"type": WORKER_REGISTER, "worker_id": worker_id,
+            "queues": queues or [], "capabilities": capabilities or {}}
+
+
+def worker_heartbeat(worker_id: str, status: str = "idle",
+                      current_job: str | None = None) -> dict:
+    d = {"type": WORKER_HEARTBEAT, "worker_id": worker_id, "status": status}
+    if current_job:
+        d["current_job"] = current_job
+    return d

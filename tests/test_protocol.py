@@ -247,6 +247,98 @@ class TestVoting:
         assert result["outcome"] == "yes"
 
 
+class TestJobSubmit:
+    def test_structure(self):
+        result = protocol.job_submit("peer1", "j1", "builtin", "math.factorial",
+                                      args=[10], kwargs={"key": "val"})
+        assert result["type"] == "job_submit"
+        assert result["to"] == "peer1"
+        assert result["job_id"] == "j1"
+        assert result["runtime"] == "builtin"
+        assert result["func"] == "math.factorial"
+        assert result["args"] == [10]
+
+    def test_defaults(self):
+        result = protocol.job_submit("p", "j2", "ray", "mod.fn")
+        assert result["args"] == []
+        assert result["kwargs"] == {}
+        assert result["resources"] == {}
+
+
+class TestJobResult:
+    def test_structure(self):
+        result = protocol.job_result("peer1", "j1", "completed", result=42)
+        assert result["type"] == "job_result"
+        assert result["result"] == 42
+
+    def test_with_error(self):
+        result = protocol.job_result("peer1", "j1", "failed", error="boom")
+        assert result["error"] == "boom"
+
+
+class TestJobCancel:
+    def test_structure(self):
+        result = protocol.job_cancel("peer1", "j1")
+        assert result == {"type": "job_cancel", "to": "peer1", "job_id": "j1"}
+
+
+class TestJobList:
+    def test_structure(self):
+        result = protocol.job_list()
+        assert result == {"type": "job_list"}
+
+    def test_with_req_id(self):
+        result = protocol.job_list(req_id="r1")
+        assert result["req_id"] == "r1"
+
+
+class TestQueuePush:
+    def test_structure(self):
+        result = protocol.queue_push("tasks", "j1", {"action": "build"}, priority=5)
+        assert result["type"] == "queue_push"
+        assert result["queue"] == "tasks"
+        assert result["priority"] == 5
+
+    def test_defaults(self):
+        result = protocol.queue_push("q", "j2", {})
+        assert result["priority"] == 0
+
+
+class TestQueuePull:
+    def test_structure(self):
+        result = protocol.queue_pull("tasks", worker_id="w1")
+        assert result["type"] == "queue_pull"
+        assert result["worker_id"] == "w1"
+
+
+class TestQueueAck:
+    def test_structure(self):
+        result = protocol.queue_ack("tasks", "j1", result="done", success=True)
+        assert result["type"] == "queue_ack"
+        assert result["result"] == "done"
+
+
+class TestQueueStatus:
+    def test_structure(self):
+        result = protocol.queue_status("tasks", req_id="r1")
+        assert result["type"] == "queue_status"
+        assert result["req_id"] == "r1"
+
+
+class TestWorkerRegister:
+    def test_structure(self):
+        result = protocol.worker_register("w1", queues=["tasks"], capabilities={"gpu": True})
+        assert result["type"] == "worker_register"
+        assert result["queues"] == ["tasks"]
+
+
+class TestWorkerHeartbeat:
+    def test_structure(self):
+        result = protocol.worker_heartbeat("w1", status="busy", current_job="j1")
+        assert result["type"] == "worker_heartbeat"
+        assert result["current_job"] == "j1"
+
+
 class TestElection:
     def test_start(self):
         result = protocol.election_start("e1")
@@ -308,6 +400,18 @@ _ALL_BUILDERS = [
     lambda: protocol.election_start("e1"),
     lambda: protocol.election_alive("p", "e1"),
     lambda: protocol.election_victory("e1"),
+    lambda: protocol.job_submit("p", "j1", "builtin", "math.factorial", [10]),
+    lambda: protocol.job_status("p", "j1"),
+    lambda: protocol.job_result("p", "j1", "completed", result=42),
+    lambda: protocol.job_cancel("p", "j1"),
+    lambda: protocol.job_list(),
+    lambda: protocol.job_update("p", "j1", "running", progress=0.5),
+    lambda: protocol.queue_push("q", "j1", {"a": 1}),
+    lambda: protocol.queue_pull("q"),
+    lambda: protocol.queue_ack("q", "j1", result="ok"),
+    lambda: protocol.queue_status("q"),
+    lambda: protocol.worker_register("w1", ["q"]),
+    lambda: protocol.worker_heartbeat("w1"),
 ]
 
 
@@ -332,7 +436,7 @@ class TestConstants:
         assert protocol.CHUNK_SIZE == 524288
 
     def test_version(self):
-        assert protocol.VERSION == "0.3.0"
+        assert protocol.VERSION == "0.4.0"
 
     def test_keepalive_defaults(self):
         assert protocol.DEFAULT_KEEPALIVE_INTERVAL == 15
@@ -362,6 +466,10 @@ _TYPE_CONSTANTS = [
     protocol.TASK_ASSIGN, protocol.TASK_STATUS, protocol.TASK_RESULT,
     protocol.VOTE_PROPOSE, protocol.VOTE_CAST, protocol.VOTE_RESULT,
     protocol.ELECTION_START, protocol.ELECTION_ALIVE, protocol.ELECTION_VICTORY,
+    protocol.JOB_SUBMIT, protocol.JOB_STATUS, protocol.JOB_RESULT,
+    protocol.JOB_CANCEL, protocol.JOB_LIST, protocol.JOB_UPDATE,
+    protocol.QUEUE_PUSH, protocol.QUEUE_PULL, protocol.QUEUE_ACK,
+    protocol.QUEUE_STATUS, protocol.WORKER_REGISTER, protocol.WORKER_HEARTBEAT,
 ]
 
 

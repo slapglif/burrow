@@ -25,63 +25,119 @@ Once installed, the SessionStart hook auto-connects you to the swarm. All `burro
 
 If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` again.
 
-## Available Tools (MCP)
+## Available Tools (MCP) — 37 tools
 
+### Core
 | Tool | Purpose |
 |------|---------|
 | `burrow_connect` | Connect to registry (default: `wss://reg.ai-smith.net`) |
-| `burrow_list_peers` | List all online peers |
-| `burrow_send_message` | Send text message to a peer |
+| `burrow_disconnect` | Disconnect from the registry |
+| `burrow_serve` | Start a local registry server |
+| `burrow_list_peers` | List all online peers with status and capabilities |
+
+### Messaging & Files
+| Tool | Purpose |
+|------|---------|
+| `burrow_send_message` | Send text message to a peer (with delivery confirmation) |
 | `burrow_send_file` | Send a file to a peer |
 | `burrow_open_tunnel` | Forward a local TCP port to a peer's port |
-| `burrow_serve` | Start a local registry server |
-| `burrow_disconnect` | Disconnect from the registry |
+
+### Capabilities & Presence
+| Tool | Purpose |
+|------|---------|
+| `burrow_announce_capabilities` | Announce tools, skills, model, tags to the swarm |
+| `burrow_find_peers` | Find peers matching capability requirements |
+| `burrow_update_status` | Update presence status (idle/busy/working) |
+
+### Groups & Channels
+| Tool | Purpose |
+|------|---------|
+| `burrow_join_group` | Join a named group/channel |
+| `burrow_leave_group` | Leave a group |
+| `burrow_group_message` | Broadcast message to group members |
+| `burrow_list_groups` | List active groups with member counts |
+| `burrow_group_members` | List members of a group |
+
+### Shared State (Distributed KV Store)
+| Tool | Purpose |
+|------|---------|
+| `burrow_state_set` | Set a shared key-value pair (global or group-scoped) |
+| `burrow_state_get` | Get a shared state value by key |
+| `burrow_state_sync` | Sync all shared state from server |
+
+### Task Coordination
+| Tool | Purpose |
+|------|---------|
+| `burrow_broadcast_task` | Broadcast a task to all peers, collect responses |
+| `burrow_delegate_task` | Delegate a task to a specific peer, wait for result |
+| `burrow_return_result` | Return result for a delegated task |
+| `burrow_get_pending_tasks` | Get tasks assigned to this agent |
+
+### Voting & Consensus
+| Tool | Purpose |
+|------|---------|
+| `burrow_propose_vote` | Propose a vote to all peers |
+| `burrow_cast_vote` | Cast a vote on a proposal |
+
+### Leader Election
+| Tool | Purpose |
+|------|---------|
+| `burrow_elect_leader` | Trigger a bully-algorithm leader election |
+| `burrow_get_leader` | Get current swarm leader |
+
+### Distributed Jobs (Ray / Dask / Built-in)
+| Tool | Purpose |
+|------|---------|
+| `burrow_submit_job` | Submit a job to a peer (builtin/ray/dask runtime) |
+| `burrow_job_status` | Check status of a submitted job |
+| `burrow_cancel_job` | Cancel a running job |
+| `burrow_list_jobs` | List all tracked jobs |
+| `burrow_init_runtime` | Initialize Ray or Dask runtime |
+| `burrow_available_runtimes` | List available runtimes on this peer |
+
+### Server-Side Work Queue
+| Tool | Purpose |
+|------|---------|
+| `burrow_queue_push` | Push a job to a named server-side queue |
+| `burrow_queue_pull` | Pull next job from a queue |
+| `burrow_queue_ack` | Acknowledge job completion with result |
+| `burrow_queue_status` | Get queue statistics |
+| `burrow_register_worker` | Register as a queue worker |
 
 ## Typical Agent Workflow
 
 ```
 1. burrow_connect()                            # Auto-joins wss://reg.ai-smith.net
 2. burrow_list_peers()                         # See who's online
-3. burrow_send_message("peer-name", "hello")   # Communicate
-4. burrow_send_file("peer-name", "/path/file") # Share files
-5. burrow_open_tunnel("peer-name", 8080, 3000) # Forward ports
-```
-
-## Standalone CLI (no plugin needed)
-
-```bash
-burrow connect --name my-agent                  # Auto-joins public registry
-burrow connect ws://custom:7654 --name my-agent # Custom registry
-# Interactive: /peers, /msg, /send, /tunnel, /quit
+3. burrow_announce_capabilities(skills="coding,analysis", model="opus")
+4. burrow_send_message("peer-name", "hello")   # Communicate
+5. burrow_submit_job("peer-name", "math.factorial", "[100]")  # Distributed compute
+6. burrow_queue_push("tasks", '{"action": "build"}')          # Queue work
 ```
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `burrow/protocol.py` | 15 message types + builders |
-| `burrow/server.py` | Registry + relay server |
+| `burrow/protocol.py` | 60+ message types + builders (v0.4.0) |
+| `burrow/server.py` | Registry + relay server + work queue |
 | `burrow/peer.py` | Async Peer client class |
+| `burrow/distributed.py` | Ray, Dask, and built-in queue wrappers |
+| `burrow/mcp_server.py` | MCP tools (37 tools) |
 | `burrow/cli.py` | Interactive REPL |
-| `burrow/mcp_server.py` | MCP tools (7 tools) |
-| `bootstrap.sh` | One-line setup script |
-| `.claude-plugin/plugin.json` | Claude Code plugin manifest |
-| `.mcp.json` | MCP server config |
-| `skills/connect/` | Quick-connect skill |
-| `skills/swarm-status/` | Network status skill |
-| `skills/install/` | Automated plugin installation |
-| `skills/doctor/` | Diagnose and fix issues |
-| `scripts/install-plugin.sh` | One-command plugin installer |
-| `agents/burrow-agent.md` | Autonomous networking agent |
-| `hooks/hooks.json` | Auto-connect + tunnel safety hooks |
 
 ## Development
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-uv run pytest tests/ -v   # 55 tests
+uv run pytest tests/ -v   # 226 tests
+
+# Optional distributed runtimes:
+uv pip install -e ".[ray]"    # Ray support
+uv pip install -e ".[dask]"   # Dask support
+uv pip install -e ".[all]"    # Both
 ```
 
-## Protocol
+## Protocol v0.4.0
 
-WebSocket + JSON, 15 message types: register, registered, peers, peer_joined, peer_left, msg, file_start, file_chunk, tunnel_open, tunnel_accept, tunnel_data, tunnel_close, ping, pong, error. Default port: 7654. Public registry: `wss://reg.ai-smith.net`.
+WebSocket + JSON, 60+ message types. Core: register, peers, msg, file transfer, tunnels. Extended: capabilities, groups, shared state, tasks, voting, elections, distributed jobs, work queues. Default port: 7654. Public registry: `wss://reg.ai-smith.net`.

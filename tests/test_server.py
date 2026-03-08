@@ -26,6 +26,8 @@ async def server():
     srv_mod.message_queues.clear()
     srv_mod.last_seen.clear()
     srv_mod.name_to_id.clear()
+    srv_mod.work_queue = srv_mod.BuiltinQueue()
+    srv_mod.job_registry.clear()
     yield uri
     srv.close()
     await srv.wait_closed()
@@ -534,5 +536,156 @@ async def test_rate_limiting(server):
             except asyncio.TimeoutError:
                 pass
         assert len(errors) > 0, "Expected rate limiting to kick in"
+    finally:
+        await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# Queue tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_queue_push_and_pull(server):
+    ws_a, reg_a = await register_client(server, "Alice")
+    ws_b, reg_b = await register_client(server, "Bob")
+    try:
+        await asyncio.wait_for(ws_a.recv(), 2)
+
+        # Alice pushes a job
+        await ws_a.send(json.dumps(protocol.queue_push("tasks", "j1", {"action": "build"}, priority=5)))
+        ack = json.loads(await asyncio.wait_for(ws_a.recv(), 2))
+        assert ack["type"] == protocol.ACK
+        assert ack["status"] == "queued"
+
+        # Bob pulls from queue
+        pull_msg = protocol.queue_pull("tasks", worker_id=reg_b["id"])
+        pull_msg["req_id"] = "pull-1"
+        await ws_b.send(json.dumps(pull_msg))
+        resp = json.loads(await asyncio.wait_for(ws_b.recv(), 2))
+        assert resp["type"] == protocol.QUEUE_PULL
+        assert resp["job_id"] == "j1"
+        assert resp["payload"] == {"action": "build"}
+        assert resp["req_id"] == "pull-1"
+    finally:
+        await ws_a.close()
+        await ws_b.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_pull_empty(server):
+    ws, _ = await register_client(server, "Alice")
+    try:
+        pull_msg = protocol.queue_pull("empty-queue")
+        pull_msg["req_id"] = "r1"
+        await ws.send(json.dumps(pull_msg))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), 2))
+        assert resp["type"] == protocol.QUEUE_PULL
+        assert resp["job_id"] is None
+    finally:
+        await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_ack_notifies_submitter(server):
+    ws_a, reg_a = await register_client(server, "Alice")
+    ws_b, reg_b = await register_client(server, "Bob")
+    try:
+        await asyncio.wait_for(ws_a.recv(), 2)
+
+        # Alice pushes
+        await ws_a.send(json.dumps(protocol.queue_push("work", "j2", {"x": 1})))
+        await asyncio.wait_for(ws_a.recv(), 2)  # ack
+
+        # Bob pulls
+        pull_msg = protocol.queue_pull("work", worker_id=reg_b["id"])
+        pull_msg["req_id"] = "p1"
+        await ws_b.send(json.dumps(pull_msg))
+        await asyncio.wait_for(ws_b.recv(), 2)
+
+        # Bob acks with result
+        await ws_b.send(json.dumps(protocol.queue_ack("work", "j2", result="built!", success=True)))
+
+        # Alice should get notified
+        notif = json.loads(await asyncio.wait_for(ws_a.recv(), 2))
+        assert notif["type"] == protocol.JOB_RESULT
+        assert notif["job_id"] == "j2"
+        assert notif["result"] == "built!"
+        assert notif["status"] == "completed"
+    finally:
+        await ws_a.close()
+        await ws_b.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_status(server):
+    ws, _ = await register_client(server, "Alice")
+    try:
+        # Push two jobs
+        await ws.send(json.dumps(protocol.queue_push("q1", "a", {"x": 1})))
+        await asyncio.wait_for(ws.recv(), 2)
+        await ws.send(json.dumps(protocol.queue_push("q1", "b", {"x": 2})))
+        await asyncio.wait_for(ws.recv(), 2)
+
+        # Query status
+        status_msg = protocol.queue_status("q1", req_id="s1")
+        await ws.send(json.dumps(status_msg))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), 2))
+        assert resp["type"] == protocol.QUEUE_STATUS
+        assert resp["req_id"] == "s1"
+        assert resp["status"]["pending"] == 2
+        assert resp["status"]["total"] == 2
+    finally:
+        await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_register(server):
+    ws, _ = await register_client(server, "Alice")
+    try:
+        await ws.send(json.dumps(protocol.worker_register("w1", queues=["tasks"])))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), 2))
+        assert resp["type"] == protocol.ACK
+        assert resp["status"] == "registered"
+    finally:
+        await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_job_relay(server):
+    """Job submit/result are relayed point-to-point like other relay types."""
+    ws_a, reg_a = await register_client(server, "Alice")
+    ws_b, reg_b = await register_client(server, "Bob")
+    try:
+        await asyncio.wait_for(ws_a.recv(), 2)
+
+        # Alice submits job to Bob
+        await ws_a.send(json.dumps(protocol.job_submit(
+            reg_b["id"], "j1", "builtin", "math.factorial", args=[5])))
+        msg = json.loads(await asyncio.wait_for(ws_b.recv(), 2))
+        assert msg["type"] == protocol.JOB_SUBMIT
+        assert msg["func"] == "math.factorial"
+        assert msg["args"] == [5]
+
+        # Bob sends result back
+        await ws_b.send(json.dumps(protocol.job_result(
+            reg_a["id"], "j1", "completed", result=120)))
+        result = json.loads(await asyncio.wait_for(ws_a.recv(), 2))
+        assert result["type"] == protocol.JOB_RESULT
+        assert result["result"] == 120
+    finally:
+        await ws_a.close()
+        await ws_b.close()
+
+
+@pytest.mark.asyncio
+async def test_job_list(server):
+    ws, _ = await register_client(server, "Alice")
+    try:
+        list_msg = protocol.job_list(req_id="jl1")
+        await ws.send(json.dumps(list_msg))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), 2))
+        assert resp["type"] == protocol.JOB_LIST
+        assert resp["req_id"] == "jl1"
+        assert isinstance(resp["jobs"], list)
     finally:
         await ws.close()

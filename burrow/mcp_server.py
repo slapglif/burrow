@@ -389,6 +389,169 @@ async def burrow_get_leader() -> str:
     return f"Leader: {_peer.leader_name} (id={_peer.leader_id}){is_me}"
 
 
+# ── Distributed Jobs ───────────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_submit_job(to: str, func: str, args: str = "[]",
+                             kwargs: str = "{}", runtime: str = "builtin",
+                             timeout_s: float = 120.0) -> str:
+    """Submit a distributed job to a peer. func is 'module.function' path.
+    Runtime: 'builtin' (in-process), 'ray', or 'dask'.
+    Args/kwargs as JSON strings. Returns job result."""
+    if not _peer or not _peer.ws:
+        return "Not connected. Call burrow_connect first."
+    import json as _json
+    try:
+        parsed_args = _json.loads(args)
+        parsed_kwargs = _json.loads(kwargs)
+    except _json.JSONDecodeError as e:
+        return f"Invalid JSON: {e}"
+    try:
+        result = await _peer.submit_job(
+            to, func, args=parsed_args, kwargs=parsed_kwargs,
+            runtime=runtime, timeout=timeout_s)
+        status = result.get("status", "unknown")
+        if status in ("completed", "finished"):
+            return f"Job completed: {result.get('result')}"
+        elif status == "failed":
+            return f"Job failed: {result.get('error', 'unknown error')}"
+        elif status == "timeout":
+            return f"Job timed out after {timeout_s}s. Job ID: {result.get('job_id')}"
+        return f"Job status: {status}. Result: {result}"
+    except Exception as exc:
+        return f"Failed to submit job: {exc}"
+
+
+@mcp.tool()
+async def burrow_job_status(to: str, job_id: str) -> str:
+    """Check the status of a previously submitted job."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    result = await _peer.check_job_status(to, job_id)
+    return f"Job {job_id}: {result.get('status', 'unknown')}"
+
+
+@mcp.tool()
+async def burrow_cancel_job(to: str, job_id: str) -> str:
+    """Cancel a running job on a peer."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    await _peer.cancel_job(to, job_id)
+    return f"Cancel request sent for job {job_id}."
+
+
+@mcp.tool()
+async def burrow_list_jobs() -> str:
+    """List all jobs tracked by the server."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    jobs = await _peer.list_all_jobs()
+    if not jobs:
+        return "No jobs tracked."
+    lines = []
+    for j in jobs:
+        if j:
+            lines.append(f"  {j.get('job_id','?')} [{j.get('status','?')}] "
+                         f"{j.get('func', j.get('payload','?'))}")
+    return f"{len(lines)} job(s):\n" + "\n".join(lines)
+
+
+@mcp.tool()
+async def burrow_init_runtime(runtime: str, address: str = "") -> str:
+    """Initialize a distributed runtime: 'ray' or 'dask'.
+    Optionally provide scheduler/cluster address."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    addr = address or None
+    if runtime == "ray":
+        ok = _peer.init_ray(addr)
+        return f"Ray {'connected' if ok else 'failed to connect'}."
+    elif runtime == "dask":
+        ok = _peer.init_dask(addr)
+        return f"Dask {'connected' if ok else 'failed to connect'}."
+    return f"Unknown runtime: {runtime}. Use 'ray' or 'dask'."
+
+
+@mcp.tool()
+async def burrow_available_runtimes() -> str:
+    """List available distributed runtimes on this peer."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    runtimes = _peer.available_runtimes
+    return f"Available runtimes: {', '.join(runtimes)}"
+
+
+# ── Server-Side Work Queue ─────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_queue_push(queue: str, payload: str, priority: int = 0) -> str:
+    """Push a job to a named server-side work queue. Payload is JSON.
+    Workers pull jobs from the queue and report results."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    import json as _json
+    try:
+        data = _json.loads(payload)
+    except _json.JSONDecodeError as e:
+        return f"Invalid JSON payload: {e}"
+    job_id = await _peer.queue_push(queue, data, priority)
+    return f"Job {job_id} pushed to queue '{queue}' (priority={priority})."
+
+
+@mcp.tool()
+async def burrow_queue_pull(queue: str) -> str:
+    """Pull the next available job from a server-side work queue."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    item = await _peer.queue_pull(queue)
+    if not item:
+        return f"No jobs available in queue '{queue}'."
+    import json as _json
+    return (f"Job {item['job_id']} from queue '{queue}':\n"
+            f"  Payload: {_json.dumps(item.get('payload', {}))}\n"
+            f"  Priority: {item.get('priority', 0)}")
+
+
+@mcp.tool()
+async def burrow_queue_ack(queue: str, job_id: str, result: str = "",
+                            success: bool = True) -> str:
+    """Acknowledge completion of a queue job. Reports result back to submitter."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    await _peer.queue_ack(queue, job_id, result=result or None, success=success)
+    status = "completed" if success else "failed"
+    return f"Job {job_id} acknowledged as {status}."
+
+
+@mcp.tool()
+async def burrow_queue_status(queue: str = "") -> str:
+    """Get status of server-side work queues."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    status = await _peer.queue_status(queue or None)
+    if not status:
+        return "No queues active."
+    import json as _json
+    return f"Queue status:\n{_json.dumps(status, indent=2)}"
+
+
+@mcp.tool()
+async def burrow_register_worker(queues: str = "", capabilities: str = "") -> str:
+    """Register this agent as a worker for server-side queues.
+    Comma-separated queue names and capabilities."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    q_list = [q.strip() for q in queues.split(",") if q.strip()] or None
+    caps = {}
+    if capabilities:
+        for cap in capabilities.split(","):
+            cap = cap.strip()
+            if cap:
+                caps[cap] = True
+    await _peer.register_worker(q_list, caps or None)
+    return f"Registered as worker for queues: {q_list or 'all'}"
+
+
 def main():
     mcp.run(transport="stdio")
 
