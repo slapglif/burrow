@@ -7,13 +7,16 @@ without Ray or Dask can still use the built-in queue.
 import asyncio
 import importlib
 import json
+import logging
 import time
 import traceback
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
+
+log = logging.getLogger("burrow.distributed")
 
 
 # ---------------------------------------------------------------------------
@@ -44,11 +47,16 @@ class JobInfo:
     submitted_at: float = field(default_factory=time.time)
     started_at: float | None = None
     completed_at: float | None = None
+    retries: int = 0
+    max_retries: int = 0
+    tags: list[str] = field(default_factory=list)
+    batch_id: str | None = None
+    log_lines: list[str] = field(default_factory=list)
     _ray_ref: Any = None
     _dask_future: Any = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "job_id": self.job_id,
             "runtime": self.runtime,
             "func": self.func,
@@ -60,7 +68,20 @@ class JobInfo:
             "submitted_at": self.submitted_at,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "retries": self.retries,
+            "tags": self.tags,
         }
+        if self.batch_id:
+            d["batch_id"] = self.batch_id
+        if self.completed_at and self.started_at:
+            d["duration_s"] = round(self.completed_at - self.started_at, 3)
+        return d
+
+    def add_log(self, message: str):
+        ts = time.strftime("%H:%M:%S")
+        line = f"[{ts}] {message}"
+        self.log_lines.append(line)
+        log.debug("job %s: %s", self.job_id, message)
 
 
 # ---------------------------------------------------------------------------
@@ -91,16 +112,16 @@ class RayRuntime:
             else:
                 self._ray.init(ignore_reinit_error=True)
             self._connected = True
+            log.info("Ray connected (address=%s)", address or "local")
             return True
-        except Exception:
+        except Exception as e:
+            log.error("Ray connection failed: %s", e)
             return False
 
     def submit(self, job: JobInfo) -> bool:
         if not self._connected:
             return False
         try:
-            # Create a remote function from the function name
-            # func should be a module.function path like "math.factorial"
             mod_name, func_name = job.func.rsplit(".", 1)
             mod = importlib.import_module(mod_name)
             func = getattr(mod, func_name)
@@ -109,10 +130,12 @@ class RayRuntime:
             job._ray_ref = ref
             job.status = JobState.RUNNING
             job.started_at = time.time()
+            job.add_log(f"submitted to Ray: {job.func}")
             return True
         except Exception as e:
             job.status = JobState.FAILED
             job.error = str(e)
+            job.add_log(f"Ray submit failed: {e}")
             return False
 
     def check_status(self, job: JobInfo) -> str:
@@ -197,8 +220,10 @@ class DaskRuntime:
             else:
                 self._client = Client()
             self._connected = True
+            log.info("Dask connected (scheduler=%s)", scheduler_address or "local")
             return True
-        except Exception:
+        except Exception as e:
+            log.error("Dask connection failed: %s", e)
             return False
 
     def submit(self, job: JobInfo) -> bool:
@@ -212,10 +237,12 @@ class DaskRuntime:
             job._dask_future = future
             job.status = JobState.RUNNING
             job.started_at = time.time()
+            job.add_log(f"submitted to Dask: {job.func}")
             return True
         except Exception as e:
             job.status = JobState.FAILED
             job.error = str(e)
+            job.add_log(f"Dask submit failed: {e}")
             return False
 
     def check_status(self, job: JobInfo) -> str:
@@ -416,13 +443,24 @@ class BuiltinQueue:
 # ---------------------------------------------------------------------------
 
 class JobExecutor:
-    """Manages local job execution using available runtimes."""
+    """Manages local job execution using available runtimes.
+
+    Features:
+    - Single job submission (submit)
+    - Batch submission (submit_batch) — fire N jobs at once
+    - Map pattern (map_func) — apply function to list of inputs
+    - Auto-retry on failure with configurable max_retries
+    - Per-job logging via job.add_log / job.log_lines
+    - Job filtering by status, tags, batch_id
+    """
 
     def __init__(self):
         self.ray = RayRuntime()
         self.dask = DaskRuntime()
         self.jobs: dict[str, JobInfo] = {}
+        self.batches: dict[str, list[str]] = {}  # batch_id -> [job_ids]
         self._monitor_task: asyncio.Task | None = None
+        self._on_complete: Callable | None = None  # callback(job)
 
     @property
     def available_runtimes(self) -> list[str]:
@@ -442,25 +480,43 @@ class JobExecutor:
     async def submit(self, job_id: str, runtime: str, func: str,
                      args: list | None = None, kwargs: dict | None = None,
                      resources: dict | None = None,
-                     submitted_by: str = "") -> JobInfo:
+                     submitted_by: str = "",
+                     max_retries: int = 0,
+                     tags: list[str] | None = None,
+                     batch_id: str | None = None) -> JobInfo:
         job = JobInfo(
             job_id=job_id, runtime=runtime, func=func,
             args=args or [], kwargs=kwargs or {},
             resources=resources or {},
             submitted_by=submitted_by,
+            max_retries=max_retries,
+            tags=tags or [],
+            batch_id=batch_id,
         )
         self.jobs[job_id] = job
+        if batch_id:
+            self.batches.setdefault(batch_id, []).append(job_id)
+        job.add_log(f"submitted (runtime={runtime}, func={func})")
+        log.info("Job %s submitted: %s via %s", job_id, func, runtime)
 
+        await self._dispatch(job)
+        return job
+
+    async def _dispatch(self, job: JobInfo):
+        """Dispatch a job to the appropriate runtime."""
+        runtime = job.runtime
         if runtime == "ray":
             if not self.ray._connected:
                 job.status = JobState.FAILED
                 job.error = "Ray not connected"
+                job.add_log("failed: Ray not connected")
             else:
                 self.ray.submit(job)
         elif runtime == "dask":
             if not self.dask._connected:
                 job.status = JobState.FAILED
                 job.error = "Dask not connected"
+                job.add_log("failed: Dask not connected")
             else:
                 self.dask.submit(job)
         elif runtime == "builtin":
@@ -468,29 +524,91 @@ class JobExecutor:
         else:
             job.status = JobState.FAILED
             job.error = f"Unknown runtime: {runtime}"
+            job.add_log(f"failed: unknown runtime {runtime}")
 
-        return job
+    async def submit_batch(self, func: str, args_list: list[list],
+                           runtime: str = "builtin",
+                           max_retries: int = 0,
+                           tags: list[str] | None = None) -> tuple[str, list[JobInfo]]:
+        """Submit multiple jobs as a batch. Returns (batch_id, jobs)."""
+        batch_id = uuid.uuid4().hex[:8]
+        jobs = []
+        for i, args in enumerate(args_list):
+            job_id = f"{batch_id}-{i}"
+            job = await self.submit(
+                job_id, runtime, func, args=args,
+                max_retries=max_retries, tags=tags, batch_id=batch_id)
+            jobs.append(job)
+        log.info("Batch %s: submitted %d jobs for %s", batch_id, len(jobs), func)
+        return batch_id, jobs
+
+    async def map_func(self, func: str, inputs: list,
+                       runtime: str = "builtin",
+                       max_retries: int = 0) -> tuple[str, list[JobInfo]]:
+        """Map a function over a list of inputs (each input becomes args=[input])."""
+        return await self.submit_batch(
+            func, [[x] for x in inputs], runtime=runtime,
+            max_retries=max_retries, tags=["map"])
+
+    def get_batch(self, batch_id: str) -> dict:
+        """Get batch status summary."""
+        job_ids = self.batches.get(batch_id, [])
+        jobs = [self.jobs[jid] for jid in job_ids if jid in self.jobs]
+        by_status = defaultdict(int)
+        for j in jobs:
+            by_status[j.status] += 1
+        results = [j.result for j in jobs if j.status == JobState.COMPLETED]
+        errors = [{"job_id": j.job_id, "error": j.error}
+                  for j in jobs if j.status == JobState.FAILED]
+        return {
+            "batch_id": batch_id,
+            "total": len(jobs),
+            "by_status": dict(by_status),
+            "results": results,
+            "errors": errors,
+            "all_done": all(j.status in (JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED)
+                           for j in jobs),
+        }
 
     async def _run_builtin(self, job: JobInfo):
-        """Execute a job in-process using asyncio."""
-        try:
-            job.status = JobState.RUNNING
-            job.started_at = time.time()
-            mod_name, func_name = job.func.rsplit(".", 1)
-            mod = importlib.import_module(mod_name)
-            func = getattr(mod, func_name)
-            if asyncio.iscoroutinefunction(func):
-                result = await func(*job.args, **job.kwargs)
-            else:
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(None, lambda: func(*job.args, **job.kwargs))
-            job.result = result
-            job.status = JobState.COMPLETED
-            job.completed_at = time.time()
-        except Exception as e:
-            job.status = JobState.FAILED
-            job.error = f"{type(e).__name__}: {e}"
-            job.completed_at = time.time()
+        """Execute a job in-process using asyncio, with retry support."""
+        while True:
+            try:
+                job.status = JobState.RUNNING
+                job.started_at = time.time()
+                job.add_log(f"running (attempt {job.retries + 1})")
+                mod_name, func_name = job.func.rsplit(".", 1)
+                mod = importlib.import_module(mod_name)
+                func = getattr(mod, func_name)
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*job.args, **job.kwargs)
+                else:
+                    loop = asyncio.get_running_loop()
+                    result = await loop.run_in_executor(None, lambda: func(*job.args, **job.kwargs))
+                job.result = result
+                job.status = JobState.COMPLETED
+                job.completed_at = time.time()
+                job.add_log(f"completed in {job.completed_at - job.started_at:.3f}s")
+                log.info("Job %s completed: %s", job.job_id, job.func)
+                if self._on_complete:
+                    self._on_complete(job)
+                return
+            except Exception as e:
+                job.retries += 1
+                if job.retries <= job.max_retries:
+                    job.add_log(f"failed (attempt {job.retries}), retrying: {e}")
+                    log.warning("Job %s retry %d/%d: %s", job.job_id,
+                               job.retries, job.max_retries, e)
+                    await asyncio.sleep(min(2 ** job.retries * 0.1, 5.0))
+                    continue
+                job.status = JobState.FAILED
+                job.error = f"{type(e).__name__}: {e}"
+                job.completed_at = time.time()
+                job.add_log(f"failed permanently: {e}")
+                log.error("Job %s failed: %s", job.job_id, e)
+                if self._on_complete:
+                    self._on_complete(job)
+                return
 
     def check_job(self, job_id: str) -> JobInfo | None:
         job = self.jobs.get(job_id)
@@ -513,7 +631,10 @@ class JobExecutor:
         job.status = JobState.CANCELLED
         return True
 
-    def list_jobs(self) -> list[dict]:
+    def list_jobs(self, status: str | None = None,
+                  tag: str | None = None,
+                  batch_id: str | None = None) -> list[dict]:
+        """List jobs with optional filtering by status, tag, or batch."""
         # Refresh statuses
         for job in self.jobs.values():
             if job.status == JobState.RUNNING:
@@ -521,4 +642,54 @@ class JobExecutor:
                     self.ray.check_status(job)
                 elif job.runtime == "dask":
                     self.dask.check_status(job)
-        return [j.to_dict() for j in self.jobs.values()]
+        result = []
+        for j in self.jobs.values():
+            if status and j.status != status:
+                continue
+            if tag and tag not in j.tags:
+                continue
+            if batch_id and j.batch_id != batch_id:
+                continue
+            result.append(j.to_dict())
+        return result
+
+    def get_job_logs(self, job_id: str) -> list[str]:
+        """Get log lines for a specific job."""
+        job = self.jobs.get(job_id)
+        return job.log_lines if job else []
+
+    def stats(self) -> dict:
+        """Get aggregate statistics across all jobs."""
+        by_status = defaultdict(int)
+        by_runtime = defaultdict(int)
+        total_duration = 0.0
+        completed = 0
+        for j in self.jobs.values():
+            by_status[j.status] += 1
+            by_runtime[j.runtime] += 1
+            if j.completed_at and j.started_at:
+                total_duration += j.completed_at - j.started_at
+                completed += 1
+        return {
+            "total_jobs": len(self.jobs),
+            "by_status": dict(by_status),
+            "by_runtime": dict(by_runtime),
+            "avg_duration_s": round(total_duration / completed, 3) if completed else 0,
+            "total_batches": len(self.batches),
+        }
+
+    def purge(self, before: float | None = None,
+              status: str | None = None) -> int:
+        """Remove completed/failed jobs. Returns count removed."""
+        to_remove = []
+        for jid, j in self.jobs.items():
+            if status and j.status != status:
+                continue
+            if before and j.completed_at and j.completed_at > before:
+                continue
+            if j.status in (JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED):
+                to_remove.append(jid)
+        for jid in to_remove:
+            del self.jobs[jid]
+        log.info("Purged %d jobs", len(to_remove))
+        return len(to_remove)

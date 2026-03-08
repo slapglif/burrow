@@ -826,6 +826,22 @@ class Peer:
         finally:
             self._job_results.pop(job_id, None)
 
+    async def submit_batch(self, to: str, func: str, args_list: list[list],
+                           runtime: str = "builtin",
+                           timeout: float = 120.0) -> list[dict]:
+        """Submit multiple jobs as a batch. Returns list of results."""
+        tasks = []
+        for args in args_list:
+            tasks.append(self.submit_job(to, func, args=args, runtime=runtime, timeout=timeout))
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def map_func(self, to: str, func: str, inputs: list,
+                       runtime: str = "builtin",
+                       timeout: float = 60.0) -> list[dict]:
+        """Map a function over inputs on a remote peer."""
+        return await self.submit_batch(to, func, [[x] for x in inputs],
+                                        runtime=runtime, timeout=timeout)
+
     async def check_job_status(self, to: str, job_id: str,
                                 timeout: float = 5.0) -> dict:
         """Query a remote peer for job status."""

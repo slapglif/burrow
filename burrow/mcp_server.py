@@ -481,6 +481,84 @@ async def burrow_available_runtimes() -> str:
     return f"Available runtimes: {', '.join(runtimes)}"
 
 
+@mcp.tool()
+async def burrow_submit_batch(to: str, func: str, args_list: str,
+                               runtime: str = "builtin",
+                               max_retries: int = 0) -> str:
+    """Submit a batch of jobs to a peer. args_list is JSON array of arg arrays.
+    Example: '[[1],[2],[3]]' submits 3 jobs with different args.
+    Returns batch_id and per-job status."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    import json as _json
+    try:
+        parsed = _json.loads(args_list)
+    except _json.JSONDecodeError as e:
+        return f"Invalid JSON: {e}"
+    results = []
+    for i, args in enumerate(parsed):
+        try:
+            r = await _peer.submit_job(to, func, args=args, runtime=runtime, timeout=120.0)
+            results.append(f"  [{i}] {r.get('status','?')}: {r.get('result', r.get('error',''))}")
+        except Exception as exc:
+            results.append(f"  [{i}] error: {exc}")
+    return f"Batch of {len(parsed)} jobs:\n" + "\n".join(results)
+
+
+@mcp.tool()
+async def burrow_map_job(to: str, func: str, inputs: str,
+                          runtime: str = "builtin") -> str:
+    """Map a function over a list of inputs on a remote peer.
+    inputs is a JSON array. Each element is passed as a single arg.
+    Example: func='math.factorial', inputs='[5,10,20]'"""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    import json as _json
+    try:
+        parsed = _json.loads(inputs)
+    except _json.JSONDecodeError as e:
+        return f"Invalid JSON: {e}"
+    results = []
+    for inp in parsed:
+        try:
+            r = await _peer.submit_job(to, func, args=[inp], runtime=runtime, timeout=60.0)
+            results.append(r.get("result", r.get("error", "?")))
+        except Exception as exc:
+            results.append(f"error: {exc}")
+    return f"Map results ({len(results)} items):\n" + "\n".join(
+        f"  {inp} -> {res}" for inp, res in zip(parsed, results))
+
+
+@mcp.tool()
+async def burrow_job_logs(job_id: str) -> str:
+    """Get execution logs for a local job."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    logs = _peer._executor.get_job_logs(job_id)
+    if not logs:
+        return f"No logs for job {job_id}."
+    return f"Logs for {job_id}:\n" + "\n".join(f"  {l}" for l in logs)
+
+
+@mcp.tool()
+async def burrow_job_stats() -> str:
+    """Get aggregate statistics for all local jobs."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    import json as _json
+    stats = _peer._executor.stats()
+    return f"Job statistics:\n{_json.dumps(stats, indent=2)}"
+
+
+@mcp.tool()
+async def burrow_purge_jobs(status: str = "") -> str:
+    """Remove completed/failed/cancelled jobs from local tracking."""
+    if not _peer or not _peer.ws:
+        return "Not connected."
+    count = _peer._executor.purge(status=status or None)
+    return f"Purged {count} jobs."
+
+
 # ── Server-Side Work Queue ─────────────────────────────────────────────────
 
 @mcp.tool()
