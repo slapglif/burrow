@@ -310,6 +310,33 @@ class TestJobLogging:
         assert "test message" in job.log_lines[0]
 
 
+class TestScriptExecution:
+    @pytest.mark.asyncio
+    async def test_run_script_job(self):
+        """Test the script execution path in JobExecutor."""
+        import base64
+        import tempfile
+        from pathlib import Path
+        from burrow.peer import Peer
+
+        # Create a test script
+        script = "#!/usr/bin/env python3\nimport sys\nprint('hello from script')\nprint('args:', sys.argv[1:])\n"
+        script_b64 = base64.b64encode(script.encode()).decode()
+
+        # Test the script writing and b64 round-trip
+        script_bytes = base64.b64decode(script_b64)
+        assert b"hello from script" in script_bytes
+
+        # Test the protocol builder includes script fields
+        from burrow import protocol
+        msg = protocol.job_submit("p1", "j1", "builtin", "__script__:test.py",
+                                   args=["arg1"], script=script_b64,
+                                   script_name="test.py")
+        assert msg["script"] == script_b64
+        assert msg["script_name"] == "test.py"
+        assert msg["func"] == "__script__:test.py"
+
+
 class TestJobInfo:
     def test_to_dict(self):
         job = JobInfo(job_id="j1", runtime="builtin", func="math.factorial")

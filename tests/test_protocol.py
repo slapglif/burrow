@@ -264,6 +264,17 @@ class TestJobSubmit:
         assert result["kwargs"] == {}
         assert result["resources"] == {}
 
+    def test_with_script(self):
+        result = protocol.job_submit("p", "j3", "builtin", "__script__:run.py",
+                                      script="c2NyaXB0", script_name="run.py")
+        assert result["script"] == "c2NyaXB0"
+        assert result["script_name"] == "run.py"
+
+    def test_without_script(self):
+        result = protocol.job_submit("p", "j4", "builtin", "math.factorial")
+        assert "script" not in result
+        assert "script_name" not in result
+
 
 class TestJobResult:
     def test_structure(self):

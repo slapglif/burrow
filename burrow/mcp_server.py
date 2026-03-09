@@ -482,6 +482,44 @@ async def burrow_available_runtimes() -> str:
 
 
 @mcp.tool()
+async def burrow_submit_script(to: str, script_path: str, args: str = "[]",
+                                timeout_s: float = 300.0) -> str:
+    """Upload a local script file to a remote peer and execute it.
+
+    Supports .py (Python), .sh (Bash), or any executable.
+    The script is transferred inline and run in a temp directory on the peer.
+    Args is a JSON array of command-line arguments.
+    Returns stdout/stderr from the script execution."""
+    if not _peer or not _peer.ws:
+        return "Not connected. Call burrow_connect first."
+    import json as _json
+    try:
+        parsed_args = _json.loads(args)
+    except _json.JSONDecodeError as e:
+        return f"Invalid JSON args: {e}"
+    try:
+        result = await _peer.submit_script(
+            to, script_path, args=parsed_args, timeout=timeout_s)
+        status = result.get("status", "unknown")
+        if status in ("completed", "finished"):
+            return f"Script completed:\n{result.get('result', '(no output)')}"
+        elif status == "failed":
+            err = result.get("error", "unknown error")
+            out = result.get("result", "")
+            msg = f"Script failed: {err}"
+            if out:
+                msg += f"\nOutput:\n{out}"
+            return msg
+        elif status == "timeout":
+            return f"Script timed out after {timeout_s}s. Job ID: {result.get('job_id')}"
+        return f"Script status: {status}"
+    except FileNotFoundError:
+        return f"Script not found: {script_path}"
+    except Exception as exc:
+        return f"Failed to submit script: {exc}"
+
+
+@mcp.tool()
 async def burrow_submit_batch(to: str, func: str, args_list: str,
                                runtime: str = "builtin",
                                max_retries: int = 0) -> str:

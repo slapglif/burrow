@@ -826,6 +826,37 @@ class Peer:
         finally:
             self._job_results.pop(job_id, None)
 
+    async def submit_script(self, to: str, script_path: str,
+                             args: list | None = None,
+                             runtime: str = "builtin",
+                             timeout: float = 120.0) -> dict:
+        """Upload a local script file to a remote peer and execute it.
+
+        The script is base64-encoded and sent inline with the job_submit message.
+        On the remote peer, it's written to a temp file and executed.
+        For Python scripts, the script is run as a subprocess.
+        """
+        path = Path(script_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Script not found: {script_path}")
+        script_content = base64.b64encode(path.read_bytes()).decode()
+        script_name = path.name
+
+        job_id = uuid.uuid4().hex[:8]
+        target = self._resolve(to)
+        fut = asyncio.get_running_loop().create_future()
+        self._job_results[job_id] = fut
+        await self._send(protocol.job_submit(
+            target, job_id, runtime, f"__script__:{script_name}",
+            args=args or [], script=script_content, script_name=script_name))
+        try:
+            result = await asyncio.wait_for(fut, timeout)
+            return result
+        except asyncio.TimeoutError:
+            return {"job_id": job_id, "status": "timeout"}
+        finally:
+            self._job_results.pop(job_id, None)
+
     async def submit_batch(self, to: str, func: str, args_list: list[list],
                            runtime: str = "builtin",
                            timeout: float = 120.0) -> list[dict]:
@@ -891,7 +922,12 @@ class Peer:
         return self._executor.available_runtimes
 
     async def _handle_job_submit(self, data: dict):
-        """Execute a job submitted by another peer."""
+        """Execute a job submitted by another peer.
+
+        If `script` field is present, the job contains an inline script file
+        (base64-encoded). It's written to a temp directory and executed as a
+        subprocess. Otherwise, func is treated as a module.function path.
+        """
         job_id = data["job_id"]
         runtime = data.get("runtime", "builtin")
         func = data["func"]
@@ -899,12 +935,21 @@ class Peer:
         kwargs = data.get("kwargs", {})
         from_id = data.get("from", "")
         from_name = data.get("from_name", "?")
+        script_b64 = data.get("script")
+        script_name = data.get("script_name")
 
         if self.on_job_received:
             self.on_job_received(from_name, job_id, func, args, kwargs)
             return
 
         try:
+            # Handle inline script execution
+            if script_b64 and func.startswith("__script__:"):
+                await self._run_script_job(
+                    job_id, script_b64, script_name or "script.py",
+                    args, from_id)
+                return
+
             job = await self._executor.submit(
                 job_id, runtime, func, args=args, kwargs=kwargs,
                 submitted_by=from_id)
@@ -919,6 +964,55 @@ class Peer:
             await self._send(protocol.job_result(
                 from_id, job_id, job.status,
                 result=job.result, error=job.error))
+        except Exception as e:
+            await self._send(protocol.job_result(
+                from_id, job_id, "failed", error=str(e)))
+
+    async def _run_script_job(self, job_id: str, script_b64: str,
+                               script_name: str, args: list, from_id: str):
+        """Write a script to temp dir and execute it as a subprocess."""
+        import subprocess
+        import tempfile
+
+        try:
+            script_bytes = base64.b64decode(script_b64)
+            script_dir = Path(tempfile.mkdtemp(prefix="burrow-scripts-"))
+            script_path = script_dir / script_name
+            script_path.write_bytes(script_bytes)
+            script_path.chmod(0o755)
+
+            # Determine how to run the script
+            if script_name.endswith(".py"):
+                cmd = ["python3", str(script_path)] + [str(a) for a in args]
+            elif script_name.endswith(".sh"):
+                cmd = ["bash", str(script_path)] + [str(a) for a in args]
+            else:
+                cmd = [str(script_path)] + [str(a) for a in args]
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(script_dir),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=300.0)
+
+            output = stdout.decode(errors="replace")
+            err_output = stderr.decode(errors="replace")
+
+            if proc.returncode == 0:
+                await self._send(protocol.job_result(
+                    from_id, job_id, "completed",
+                    result=output.strip() or "(no output)"))
+            else:
+                await self._send(protocol.job_result(
+                    from_id, job_id, "failed",
+                    error=f"exit code {proc.returncode}: {err_output.strip()}",
+                    result=output.strip()))
+        except asyncio.TimeoutError:
+            await self._send(protocol.job_result(
+                from_id, job_id, "failed", error="script timed out (300s)"))
         except Exception as e:
             await self._send(protocol.job_result(
                 from_id, job_id, "failed", error=str(e)))

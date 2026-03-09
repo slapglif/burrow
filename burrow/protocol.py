@@ -326,11 +326,19 @@ def election_victory(election_id: str) -> dict:
 # Distributed jobs
 
 def job_submit(to: str, job_id: str, runtime: str, func: str, args: list | None = None,
-               kwargs: dict | None = None, resources: dict | None = None) -> dict:
-    """Submit a job to a peer. runtime: 'ray', 'dask', or 'builtin'."""
-    return {"type": JOB_SUBMIT, "to": to, "job_id": job_id, "runtime": runtime,
-            "func": func, "args": args or [], "kwargs": kwargs or {},
-            "resources": resources or {}}
+               kwargs: dict | None = None, resources: dict | None = None,
+               script: str | None = None, script_name: str | None = None) -> dict:
+    """Submit a job to a peer. runtime: 'ray', 'dask', or 'builtin'.
+    If script is set, it contains the base64-encoded script content to run.
+    script_name is the filename for the script."""
+    d = {"type": JOB_SUBMIT, "to": to, "job_id": job_id, "runtime": runtime,
+         "func": func, "args": args or [], "kwargs": kwargs or {},
+         "resources": resources or {}}
+    if script:
+        d["script"] = script
+    if script_name:
+        d["script_name"] = script_name
+    return d
 
 
 def job_status(to: str, job_id: str, req_id: str | None = None) -> dict:
