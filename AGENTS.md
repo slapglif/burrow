@@ -18,7 +18,7 @@ This script dynamically discovers all paths, creates the venv, installs deps, sy
 the plugins directory, registers in `installed_plugins.json`, enables in `settings.json`,
 and verifies MCP + registry connectivity. Run it again to fix any issues.
 
-After install, the SessionStart hook auto-connects to `wss://reg.ai-smith.net`. **42 tools** are available immediately:
+After install, the SessionStart hook auto-connects to `wss://reg.ai-smith.net`. **43 tools** are available immediately:
 
 #### Core & Messaging
 | Tool | What It Does |
@@ -76,6 +76,7 @@ After install, the SessionStart hook auto-connects to `wss://reg.ai-smith.net`. 
 | `burrow_purge_jobs()` | Clean up old jobs |
 | `burrow_init_runtime(runtime)` | Initialize Ray or Dask |
 | `burrow_available_runtimes()` | List available runtimes |
+| `burrow_submit_script(to, script)` | Submit a script for distributed execution |
 
 #### Server-Side Work Queue
 | Tool | What It Does |

@@ -25,7 +25,7 @@ Once installed, the SessionStart hook auto-connects you to the swarm. All `burro
 
 If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` again.
 
-## Available Tools (MCP) — 42 tools
+## Available Tools (MCP) — 43 tools
 
 ### Core
 | Tool | Purpose |
@@ -99,6 +99,7 @@ If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` 
 | `burrow_purge_jobs` | Remove completed/failed jobs |
 | `burrow_init_runtime` | Initialize Ray or Dask runtime |
 | `burrow_available_runtimes` | List available runtimes on this peer |
+| `burrow_submit_script` | Submit a script for distributed execution |
 
 ### Server-Side Work Queue
 | Tool | Purpose |
@@ -130,7 +131,7 @@ If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` 
 | `burrow/server.py` | Registry + relay server + work queue |
 | `burrow/peer.py` | Async Peer client class |
 | `burrow/distributed.py` | Ray, Dask, and built-in queue wrappers |
-| `burrow/mcp_server.py` | MCP tools (42 tools) |
+| `burrow/mcp_server.py` | MCP tools (43 tools) |
 | `burrow/cli.py` | Interactive REPL |
 
 ## Development

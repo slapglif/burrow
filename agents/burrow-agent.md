@@ -46,6 +46,7 @@ tools:
   - burrow_queue_ack
   - burrow_queue_status
   - burrow_register_worker
+  - burrow_submit_script
   - Bash
   - Read
 whenToUse: |

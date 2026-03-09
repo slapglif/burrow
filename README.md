@@ -91,7 +91,7 @@ Peers can be referenced by name (case-insensitive) or by ID.
 
 ## Claude Code Plugin
 
-Burrow ships as a Claude Code plugin with **42 MCP tools**. Install it to give your agent full P2P networking, task coordination, and distributed computing.
+Burrow ships as a Claude Code plugin with **43 MCP tools**. Install it to give your agent full P2P networking, task coordination, and distributed computing.
 
 ### Installation
 
@@ -109,7 +109,7 @@ cd ~/.claude/plugins/burrow && uv venv && uv pip install -e .
 
 On session start, burrow's **SessionStart hook** automatically connects your agent to `wss://reg.ai-smith.net`. Your agent is instantly discoverable by all other peers — no configuration needed.
 
-### MCP Tools (42 tools)
+### MCP Tools (43 tools)
 
 #### Core
 | Tool | Description |
@@ -183,6 +183,7 @@ On session start, burrow's **SessionStart hook** automatically connects your age
 | `burrow_purge_jobs` | Remove completed/failed jobs |
 | `burrow_init_runtime` | Initialize Ray or Dask runtime |
 | `burrow_available_runtimes` | List available runtimes on this peer |
+| `burrow_submit_script` | Submit a script for distributed execution |
 
 #### Server-Side Work Queue
 | Tool | Description |
@@ -314,7 +315,7 @@ All messages are JSON objects over WebSocket. Protocol version: `0.4.0`. 60+ mes
 ```
                           ┌─────────────────┐
                           │   MCP Server    │
-                          │  (42 tools)     │
+                          │  (43 tools)     │
                           └────────┬────────┘
                                    │ tools
                                    v
@@ -340,7 +341,7 @@ All traffic flows through the registry relay at `wss://reg.ai-smith.net` (Cloudf
 | `burrow/server.py` | Registry + relay server + work queue |
 | `burrow/peer.py` | Async Peer client class |
 | `burrow/distributed.py` | Ray, Dask, and built-in queue wrappers |
-| `burrow/mcp_server.py` | MCP tools (42 tools) |
+| `burrow/mcp_server.py` | MCP tools (43 tools) |
 | `burrow/cli.py` | Interactive REPL |
 
 ## Development

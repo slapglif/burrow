@@ -72,8 +72,8 @@ uv pip install -e . -q
 ok "Venv + deps installed"
 
 # --- Verify MCP server ---
-.venv/bin/python -c "from burrow.mcp_server import mcp; assert len(mcp._tool_manager._tools) == 7" 2>/dev/null
-ok "MCP server: 7 tools verified"
+.venv/bin/python -c "from burrow.mcp_server import mcp; assert len(mcp._tool_manager._tools) >= 43, f'Expected >=43 tools, got {len(mcp._tool_manager._tools)}'" 2>/dev/null
+ok "MCP server: $(. .venv/bin/activate && python -c 'from burrow.mcp_server import mcp; print(len(mcp._tool_manager._tools))' 2>/dev/null || echo '43+') tools verified"
 
 # --- Create plugins directory ---
 mkdir -p "$PLUGINS_DIR"
@@ -108,7 +108,7 @@ try:
 except Exception:
     pass
 
-version = '0.2.0'
+version = '0.4.0'
 try:
     with open('$BURROW_DIR/.claude-plugin/plugin.json') as f:
         version = json.load(f).get('version', version)
@@ -184,6 +184,5 @@ echo ""
 echo "Restart Claude Code to activate. The SessionStart hook will"
 echo "auto-connect you to wss://reg.ai-smith.net on next session."
 echo ""
-echo "Tools available: burrow_connect, burrow_list_peers,"
-echo "burrow_send_message, burrow_send_file, burrow_open_tunnel,"
-echo "burrow_serve, burrow_disconnect"
+echo "All burrow_* tools are now available (42+ tools)."
+echo "See CLAUDE.md for the full tool listing."
