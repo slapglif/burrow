@@ -25,7 +25,7 @@ Once installed, the SessionStart hook auto-connects you to the swarm. All `burro
 
 If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` again.
 
-## Available Tools (MCP) — 37 tools
+## Available Tools (MCP) — 42 tools
 
 ### Core
 | Tool | Purpose |
@@ -38,7 +38,7 @@ If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` 
 ### Messaging & Files
 | Tool | Purpose |
 |------|---------|
-| `burrow_send_message` | Send text message to a peer (with delivery confirmation) |
+| `burrow_send_message` | Send text message to a peer (with ACK/NACK delivery confirmation) |
 | `burrow_send_file` | Send a file to a peer |
 | `burrow_open_tunnel` | Forward a local TCP port to a peer's port |
 
@@ -89,16 +89,21 @@ If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` 
 | Tool | Purpose |
 |------|---------|
 | `burrow_submit_job` | Submit a job to a peer (builtin/ray/dask runtime) |
+| `burrow_submit_batch` | Submit a batch of jobs in parallel |
+| `burrow_map_job` | Map a function over a list of inputs |
 | `burrow_job_status` | Check status of a submitted job |
 | `burrow_cancel_job` | Cancel a running job |
 | `burrow_list_jobs` | List all tracked jobs |
+| `burrow_job_logs` | Get execution logs for a job |
+| `burrow_job_stats` | Get aggregate job statistics |
+| `burrow_purge_jobs` | Remove completed/failed jobs |
 | `burrow_init_runtime` | Initialize Ray or Dask runtime |
 | `burrow_available_runtimes` | List available runtimes on this peer |
 
 ### Server-Side Work Queue
 | Tool | Purpose |
 |------|---------|
-| `burrow_queue_push` | Push a job to a named server-side queue |
+| `burrow_queue_push` | Push a job to a named server-side priority queue |
 | `burrow_queue_pull` | Pull next job from a queue |
 | `burrow_queue_ack` | Acknowledge job completion with result |
 | `burrow_queue_status` | Get queue statistics |
@@ -111,8 +116,10 @@ If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` 
 2. burrow_list_peers()                         # See who's online
 3. burrow_announce_capabilities(skills="coding,analysis", model="opus")
 4. burrow_send_message("peer-name", "hello")   # Communicate
-5. burrow_submit_job("peer-name", "math.factorial", "[100]")  # Distributed compute
-6. burrow_queue_push("tasks", '{"action": "build"}')          # Queue work
+5. burrow_delegate_task("worker", "run tests") # Coordinate work
+6. burrow_submit_job("worker", "math.factorial", "[100]")  # Distributed compute
+7. burrow_queue_push("tasks", '{"action": "build"}')       # Queue work
+8. burrow_propose_vote("Ship v2?")             # Consensus
 ```
 
 ## Key Files
@@ -123,14 +130,14 @@ If something breaks, run the `doctor` skill or `bash scripts/install-plugin.sh` 
 | `burrow/server.py` | Registry + relay server + work queue |
 | `burrow/peer.py` | Async Peer client class |
 | `burrow/distributed.py` | Ray, Dask, and built-in queue wrappers |
-| `burrow/mcp_server.py` | MCP tools (37 tools) |
+| `burrow/mcp_server.py` | MCP tools (42 tools) |
 | `burrow/cli.py` | Interactive REPL |
 
 ## Development
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-uv run pytest tests/ -v   # 226 tests
+uv run pytest tests/ -v   # 239 tests
 
 # Optional distributed runtimes:
 uv pip install -e ".[ray]"    # Ray support
