@@ -137,3 +137,13 @@ The permanent registry is at `wss://reg.ai-smith.net`. All peers auto-connect he
 - Always verify peer names before sending sensitive files
 - The public registry at `reg.ai-smith.net` is the trusted default
 - Job execution uses importlib (not pickle) — only module.function paths are accepted
+
+## MCP/Plugin Troubleshooting
+
+If tools aren't available or MCP shows "Failed to connect":
+
+1. **Check `.mcp.json`** — must use **absolute path**, not `${CLAUDE_PLUGIN_ROOT}`
+2. **Re-run installer**: `bash scripts/install-plugin.sh` (writes correct absolute path)
+3. **Verify**: `claude mcp list` should show `✓ Connected`
+4. **`claude plugin list` showing "failed to load"** is normal for local plugins — ignore it
+5. **Venv issues**: Always use `uv venv`, never `python3 -m venv`

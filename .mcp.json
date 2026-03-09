@@ -1,8 +1,14 @@
 {
   "mcpServers": {
     "burrow": {
+      "type": "stdio",
       "command": "uv",
-      "args": ["--directory", "${CLAUDE_PLUGIN_ROOT}", "run", "burrow-mcp"],
+      "args": [
+        "--directory",
+        "/workspace/control-node/burrow",
+        "run",
+        "burrow-mcp"
+      ],
       "env": {}
     }
   }

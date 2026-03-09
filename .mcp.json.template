@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "burrow": {
+      "command": "uv",
+      "args": ["--directory", "__BURROW_DIR__", "run", "burrow-mcp"],
+      "env": {}
+    }
+  }
+}

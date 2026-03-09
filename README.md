@@ -96,14 +96,19 @@ Burrow ships as a Claude Code plugin with **43 MCP tools**. Install it to give y
 ### Installation
 
 ```bash
-# Automated (recommended)
+# Automated (recommended) — works from any GitHub clone
 git clone https://github.com/slapglif/burrow.git && cd burrow
 bash scripts/install-plugin.sh
-
-# Manual
-git clone https://github.com/slapglif/burrow.git ~/.claude/plugins/burrow
-cd ~/.claude/plugins/burrow && uv venv && uv pip install -e .
 ```
+
+The install script handles everything: venv creation (`uv venv`), dependency install, symlink into `~/.claude/plugins/`, MCP registration with absolute paths, and connectivity verification.
+
+```bash
+# Verify after install
+claude mcp list    # Should show: burrow ... ✓ Connected
+```
+
+> **Note**: `claude plugin list` may show "failed to load" for `burrow@local` — this is expected for locally-installed plugins and does **not** affect MCP tool availability. The MCP server is the primary integration.
 
 ### Auto-Connect
 

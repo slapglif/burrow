@@ -146,6 +146,61 @@ uv pip install -e ".[dask]"   # Dask support
 uv pip install -e ".[all]"    # Both
 ```
 
+## Plugin & MCP Setup
+
+### How It Works
+
+The MCP server is the primary integration point — it exposes all 43 `burrow_*` tools to Claude Code. The `.mcp.json` file in the repo root tells Claude Code how to start the MCP server.
+
+**Critical**: `.mcp.json` must use an **absolute path** to the burrow directory, not `${CLAUDE_PLUGIN_ROOT}`. The variable does not resolve reliably outside plugin session context.
+
+```json
+{
+  "mcpServers": {
+    "burrow": {
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/burrow", "run", "burrow-mcp"]
+    }
+  }
+}
+```
+
+The install script (`scripts/install-plugin.sh`) writes the correct absolute path automatically.
+
+### Verifying the Setup
+
+```bash
+# MCP connectivity (primary — this is what matters)
+claude mcp list
+# Expected: "burrow: ... ✓ Connected"
+
+# Plugin listing (informational only)
+claude plugin list
+# May show "failed to load" for @local plugins — this is expected
+# and does NOT affect MCP tool availability
+
+# Manual MCP handshake test
+printf '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n' \
+  | uv --directory /path/to/burrow run burrow-mcp 2>/dev/null \
+  | tail -1 | python3 -c "import sys,json; print(len(json.load(sys.stdin)['result']['tools']), 'tools')"
+```
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `claude mcp list` shows "Failed to connect" | Edit `.mcp.json` — replace `${CLAUDE_PLUGIN_ROOT}` with absolute path to burrow dir |
+| `claude plugin list` shows "failed to load" | Normal for local plugins. MCP tools still work. Ignore this. |
+| `claude mcp add` says "already exists" | Run `claude mcp remove burrow` first, then re-add |
+| MCP works manually but not via `claude mcp list` | Ensure `uv` is on PATH and `.venv` exists in burrow dir |
+| Venv creation fails with `python3 -m venv` | Use `uv venv` instead — it doesn't require `python3.X-venv` package |
+
+### Key Insight: Plugin vs MCP
+
+- **MCP server** = the tool provider. This is what gives Claude Code the 43 `burrow_*` tools. Configured in `.mcp.json`.
+- **Plugin system** = a marketplace/registration mechanism. The `claude plugin list` / `installed_plugins.json` / `settings.json` entries are for the plugin registry. Local (`@local`) plugins may show errors because there's no local marketplace to resolve against — this is cosmetic and doesn't affect MCP.
+- **If MCP works (`claude mcp list` shows `✓ Connected`), the tools are available.** The plugin status is irrelevant.
+
 ## Protocol v0.4.0
 
 WebSocket + JSON, 60+ message types. Core: register, peers, msg, file transfer, tunnels. Extended: capabilities, groups, shared state, tasks, voting, elections, distributed jobs, work queues. Default port: 7654. Public registry: `wss://reg.ai-smith.net`.

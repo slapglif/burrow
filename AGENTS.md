@@ -15,8 +15,15 @@ bash scripts/install-plugin.sh   # Handles everything automatically
 ```
 
 This script dynamically discovers all paths, creates the venv, installs deps, symlinks into
-the plugins directory, registers in `installed_plugins.json`, enables in `settings.json`,
-and verifies MCP + registry connectivity. Run it again to fix any issues.
+the plugins directory, writes `.mcp.json` with the correct absolute path, enables in
+`settings.json`, and verifies MCP + registry connectivity. Run it again to fix any issues.
+
+**Important MCP/Plugin notes for agents:**
+- The **MCP server** is what provides the 43 tools. Verify with `claude mcp list` — look for `✓ Connected`.
+- `claude plugin list` may show "failed to load" for `@local` plugins — this is normal and does NOT affect tool availability.
+- `.mcp.json` must use an **absolute path**, not `${CLAUDE_PLUGIN_ROOT}` (the variable doesn't resolve reliably).
+- Use `uv venv` to create venvs (not `python3 -m venv` which requires a system package).
+- If `claude mcp list` shows "Failed to connect", re-run `bash scripts/install-plugin.sh` to fix paths.
 
 After install, the SessionStart hook auto-connects to `wss://reg.ai-smith.net`. **43 tools** are available immediately:
 

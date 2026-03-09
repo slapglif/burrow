@@ -89,7 +89,7 @@ else
     ok "Symlink already correct"
 fi
 
-# --- Register in installed_plugins.json ---
+# --- Register in installed_plugins.json (informational, not required for MCP) ---
 if [ ! -f "$INSTALLED" ]; then
     echo '{"version": 2, "plugins": {}}' > "$INSTALLED"
 fi
@@ -144,6 +144,37 @@ with open('$SETTINGS', 'w') as f:
 "
 ok "Enabled in settings.json"
 
+# --- Note about plugin vs MCP ---
+info "Note: 'claude plugin list' may show 'failed to load' for @local plugins."
+info "This is cosmetic — MCP tools work regardless. Verify with 'claude mcp list'."
+
+# --- Write .mcp.json with absolute path ---
+# CRITICAL: Must use absolute path, not ${CLAUDE_PLUGIN_ROOT} which doesn't resolve
+# reliably outside plugin session context.
+REAL_BURROW_ABS="$(readlink -f "$BURROW_DIR")"
+cat > "$BURROW_DIR/.mcp.json" <<MCPEOF
+{
+  "mcpServers": {
+    "burrow": {
+      "command": "uv",
+      "args": ["--directory", "$REAL_BURROW_ABS", "run", "burrow-mcp"],
+      "env": {}
+    }
+  }
+}
+MCPEOF
+ok ".mcp.json written with absolute path: $REAL_BURROW_ABS"
+
+# --- Register MCP server with claude CLI (if available) ---
+if command -v claude &>/dev/null; then
+    # Remove existing entry first (ignore errors if it doesn't exist)
+    claude mcp remove burrow 2>/dev/null || true
+    # Add with project scope using absolute path
+    claude mcp add burrow -s project -- uv --directory "$REAL_BURROW_ABS" run burrow-mcp 2>/dev/null && \
+        ok "MCP registered via 'claude mcp add'" || \
+        warn "Could not register via 'claude mcp add' (may already exist in .mcp.json — OK)"
+fi
+
 # --- Test MCP handshake ---
 RESULT=$(echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"installer","version":"1.0"}}}' \
   | timeout 5 uv --directory "$BURROW_DIR" run burrow-mcp 2>/dev/null \
@@ -184,5 +215,6 @@ echo ""
 echo "Restart Claude Code to activate. The SessionStart hook will"
 echo "auto-connect you to wss://reg.ai-smith.net on next session."
 echo ""
-echo "All burrow_* tools are now available (42+ tools)."
+echo "All 43 burrow_* tools are now available."
+echo "Verify with: claude mcp list"
 echo "See CLAUDE.md for the full tool listing."
