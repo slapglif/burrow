@@ -179,10 +179,37 @@ async def handler(ws):
                         by_id.pop(reconnect_id, None)
                     if reconnect_id:
                         peer_id = reconnect_id
-                        # Allow name reuse on reconnect
-                    elif any(v["name"] == name for v in peers.values()):
-                        await ws.send(json.dumps({"type": ERROR, "message": f"name already taken: {name}"}))
-                        continue
+                        # Allow name reuse on reconnect — also evict stale entry
+                        stale_ws = None
+                        for w, v in peers.items():
+                            if v["name"] == name and w is not ws:
+                                stale_ws = w
+                                break
+                        if stale_ws:
+                            stale_info = peers.pop(stale_ws)
+                            by_id.pop(stale_info["id"], None)
+                            name_to_id.pop(stale_info["name"], None)
+                    else:
+                        # Check for name collision — but also detect stale connections
+                        conflict_ws = None
+                        for w, v in peers.items():
+                            if v["name"] == name and w is not ws:
+                                conflict_ws = w
+                                break
+                        if conflict_ws:
+                            # Check if the conflicting connection is still alive
+                            try:
+                                await conflict_ws.ping()
+                                # Still alive — reject the new registration
+                                await ws.send(json.dumps({"type": ERROR, "message": f"name already taken: {name}"}))
+                                continue
+                            except Exception:
+                                # Stale connection — evict it
+                                stale_info = peers.pop(conflict_ws, None)
+                                if stale_info:
+                                    by_id.pop(stale_info["id"], None)
+                                    name_to_id.pop(stale_info["name"], None)
+                                    print(f"- {stale_info['name']} ({stale_info['id']}) [stale, evicted]")
 
                     caps = msg.get("capabilities", {})
                     peers[ws] = {
@@ -595,6 +622,9 @@ async def handler(ws):
         if ws in peers:
             info = peers.pop(ws)
             by_id.pop(info["id"], None)
+            # Clean up name reservation so the name can be reused immediately
+            if name_to_id.get(info["name"]) == info["id"]:
+                name_to_id.pop(info["name"], None)
             last_seen[info["id"]] = (info["name"], time.monotonic())
             # Remove from groups
             for g in list(info.get("groups", set())):

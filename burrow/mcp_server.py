@@ -17,6 +17,7 @@ DEFAULT_REGISTRY = "wss://reg.ai-smith.net"
 _peer: Peer | None = None
 _listen_task: asyncio.Task | None = None
 _server_task: asyncio.Task | None = None
+_last_reconnect_id: str | None = None  # Preserved across disconnect/connect cycles
 
 
 # ── Core ────────────────────────────────────────────────────────────────────
@@ -37,7 +38,7 @@ async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
     """Connect to a burrow registry and register as a peer.
     Provide token if the server requires authentication.
     Auto-reconnects on connection loss."""
-    global _peer, _listen_task
+    global _peer, _listen_task, _last_reconnect_id
     if _peer and _peer.ws:
         return f"Already connected as '{_peer.name}' (id={_peer.id}). Disconnect first."
     if name is None:
@@ -45,6 +46,9 @@ async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
     if token is None:
         token = os.environ.get("BURROW_TOKEN")
     _peer = Peer(url, name, token=token, auto_reconnect=True)
+    # Reuse previous peer ID so the server allows name reuse after disconnect
+    if _last_reconnect_id:
+        _peer._reconnect_id = _last_reconnect_id
     try:
         await _peer.connect()
     except Exception as exc:
@@ -64,10 +68,12 @@ async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
 @mcp.tool()
 async def burrow_disconnect() -> str:
     """Disconnect from the burrow registry."""
-    global _peer, _listen_task
+    global _peer, _listen_task, _last_reconnect_id
     if not _peer or not _peer.ws:
         return "Not connected."
     name = _peer.name
+    # Preserve reconnect ID so we can reclaim the same name on next connect
+    _last_reconnect_id = _peer._reconnect_id or _peer.id
     await _peer.stop()
     _peer = None
     _listen_task = None
