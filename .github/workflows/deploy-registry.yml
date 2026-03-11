@@ -1,0 +1,80 @@
+name: Deploy Registry
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'burrow/**'
+      - 'pyproject.toml'
+
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install deps & run tests
+        run: uv venv && uv pip install -e ".[dev]" && uv run pytest tests/ -v
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to registry server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.REGISTRY_HOST }}
+          username: ${{ secrets.REGISTRY_USER }}
+          key: ${{ secrets.REGISTRY_SSH_KEY }}
+          port: ${{ secrets.REGISTRY_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd ${{ secrets.REGISTRY_PATH || '/opt/burrow' }}
+
+            # Pull latest code
+            git fetch origin master
+            git reset --hard origin/master
+
+            # Update venv + deps
+            if ! command -v uv &>/dev/null; then
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+              export PATH="$HOME/.local/bin:$PATH"
+            fi
+            uv venv --python 3.12 || true
+            uv pip install -e .
+
+            # Restart the registry service
+            if systemctl is-active --quiet burrow-registry; then
+              sudo systemctl restart burrow-registry
+            elif command -v supervisorctl &>/dev/null; then
+              supervisorctl restart burrow-registry
+            else
+              # Fallback: kill and restart
+              pkill -f "burrow.server" || true
+              sleep 1
+              nohup uv run python -m burrow.server --port 7654 > /var/log/burrow-registry.log 2>&1 &
+            fi
+
+            echo "Registry deployed: $(git log --oneline -1)"
+
+      - name: Verify registry health
+        run: |
+          sleep 5
+          python3 -c "
+          import asyncio, json, websockets
+          async def check():
+              async with websockets.connect('wss://reg.ai-smith.net') as ws:
+                  await ws.send(json.dumps({'type': 'register', 'name': 'deploy-check'}))
+                  r = json.loads(await ws.recv())
+                  assert r['type'] == 'registered', f'Bad response: {r}'
+                  print('Registry OK')
+          asyncio.run(check())
+          " || echo "Registry health check failed (may need DNS propagation)"

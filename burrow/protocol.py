@@ -1,7 +1,7 @@
 """Burrow P2P protocol — message types, builders, and constants."""
 
 # Protocol version
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 # Network defaults
 DEFAULT_PORT = 7654
@@ -87,6 +87,14 @@ QUEUE_ACK = "queue_ack"
 QUEUE_STATUS = "queue_status"
 WORKER_REGISTER = "worker_register"
 WORKER_HEARTBEAT = "worker_heartbeat"
+
+# Remote execution
+EXEC_REQUEST = "exec_request"
+EXEC_RESPONSE = "exec_response"
+
+# Reverse tunnel (remote peer opens a tunnel back to requester)
+REVERSE_TUNNEL_REQUEST = "reverse_tunnel_request"
+REVERSE_TUNNEL_ACCEPT = "reverse_tunnel_accept"
 
 
 # --- Builder functions ---
@@ -429,3 +437,44 @@ def worker_heartbeat(worker_id: str, status: str = "idle",
     if current_job:
         d["current_job"] = current_job
     return d
+
+
+# Remote execution
+
+def exec_request(to: str, exec_id: str, command: str,
+                 timeout_s: float = 60.0, cwd: str | None = None,
+                 env: dict | None = None) -> dict:
+    """Request remote command execution on a peer."""
+    d = {"type": EXEC_REQUEST, "to": to, "exec_id": exec_id,
+         "command": command, "timeout_s": timeout_s}
+    if cwd:
+        d["cwd"] = cwd
+    if env:
+        d["env"] = env
+    return d
+
+
+def exec_response(to: str, exec_id: str, exit_code: int,
+                  stdout: str = "", stderr: str = "",
+                  error: str | None = None) -> dict:
+    """Response from remote command execution."""
+    d = {"type": EXEC_RESPONSE, "to": to, "exec_id": exec_id,
+         "exit_code": exit_code, "stdout": stdout, "stderr": stderr}
+    if error:
+        d["error"] = error
+    return d
+
+
+# Reverse tunnel
+
+def reverse_tunnel_request(to: str, tunnel_id: str,
+                           remote_port: int, local_port: int) -> dict:
+    """Request a reverse tunnel: remote peer listens on remote_port,
+    forwards traffic to requester's local_port."""
+    return {"type": REVERSE_TUNNEL_REQUEST, "to": to, "tunnel_id": tunnel_id,
+            "remote_port": remote_port, "local_port": local_port}
+
+
+def reverse_tunnel_accept(to: str, tunnel_id: str) -> dict:
+    """Accept a reverse tunnel request."""
+    return {"type": REVERSE_TUNNEL_ACCEPT, "to": to, "tunnel_id": tunnel_id}

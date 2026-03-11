@@ -3,6 +3,7 @@
 import asyncio
 import json
 import base64
+import os
 import random
 import time
 import uuid
@@ -84,6 +85,11 @@ class Peer:
         self._job_results = {}        # job_id -> Future (for submitted jobs awaiting results)
         self._job_callbacks = {}      # job_id -> callback
         self.on_job_received = None   # (from_name, job_id, func, args, kwargs) -> auto-execute if None
+
+        # Remote execution
+        self._exec_results = {}       # exec_id -> Future
+        self.exec_enabled = True      # whether to accept incoming exec requests
+        self.on_exec_request = None   # (from_name, exec_id, command) -> allow/deny
 
     # --- Core lifecycle ---
 
@@ -493,6 +499,23 @@ class Peer:
 
             elif kind == protocol.QUEUE_STATUS:
                 pass  # handled via req_id
+
+            # --- Remote execution ---
+            elif kind == protocol.EXEC_REQUEST:
+                asyncio.create_task(self._handle_exec_request(data))
+
+            elif kind == protocol.EXEC_RESPONSE:
+                eid = data.get("exec_id")
+                fut = self._exec_results.pop(eid, None)
+                if fut and not fut.done():
+                    fut.set_result(data)
+
+            # --- Reverse tunnel ---
+            elif kind == protocol.REVERSE_TUNNEL_REQUEST:
+                asyncio.create_task(self._handle_reverse_tunnel_request(data))
+
+            elif kind == protocol.REVERSE_TUNNEL_ACCEPT:
+                pass  # handled via tunnel_id tracking
 
             # --- Errors / keepalive ---
             elif kind == protocol.ERROR:
@@ -1083,6 +1106,125 @@ class Peer:
                                 current_job: str | None = None):
         """Send a heartbeat to the server."""
         await self._send(protocol.worker_heartbeat(self.id, status, current_job))
+
+    # --- Remote execution ---
+
+    async def exec_command(self, to: str, command: str, *,
+                           timeout: float = 60.0, cwd: str | None = None,
+                           env: dict | None = None) -> dict:
+        """Execute a command on a remote peer. Returns {exit_code, stdout, stderr}."""
+        target = self._resolve(to)
+        exec_id = uuid.uuid4().hex[:8]
+        fut = asyncio.get_running_loop().create_future()
+        self._exec_results[exec_id] = fut
+        await self._send(protocol.exec_request(target, exec_id, command,
+                                                timeout_s=timeout, cwd=cwd, env=env))
+        try:
+            result = await asyncio.wait_for(fut, timeout + 5.0)
+            return {
+                "exit_code": result.get("exit_code", -1),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "error": result.get("error"),
+            }
+        except asyncio.TimeoutError:
+            return {"exit_code": -1, "stdout": "", "stderr": "",
+                    "error": f"exec timed out after {timeout}s"}
+        finally:
+            self._exec_results.pop(exec_id, None)
+
+    async def _handle_exec_request(self, data: dict):
+        """Handle incoming exec request from a peer."""
+        exec_id = data.get("exec_id", "")
+        from_id = data.get("from", "")
+        from_name = data.get("from_name", "?")
+        command = data.get("command", "")
+        timeout_s = data.get("timeout_s", 60.0)
+        cwd = data.get("cwd")
+        env_override = data.get("env")
+
+        if not self.exec_enabled:
+            await self._send(protocol.exec_response(
+                from_id, exec_id, exit_code=-1,
+                error="exec disabled on this peer"))
+            return
+
+        if self.on_exec_request:
+            allowed = self.on_exec_request(from_name, exec_id, command)
+            if not allowed:
+                await self._send(protocol.exec_response(
+                    from_id, exec_id, exit_code=-1,
+                    error="exec denied by policy"))
+                return
+
+        print(f"Exec [{exec_id}] from {from_name}: {command[:80]}")
+        try:
+            env = dict(os.environ)
+            if env_override:
+                env.update(env_override)
+
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_s)
+
+            await self._send(protocol.exec_response(
+                from_id, exec_id,
+                exit_code=proc.returncode,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace")))
+
+        except asyncio.TimeoutError:
+            await self._send(protocol.exec_response(
+                from_id, exec_id, exit_code=-1,
+                error=f"command timed out ({timeout_s}s)"))
+        except Exception as e:
+            await self._send(protocol.exec_response(
+                from_id, exec_id, exit_code=-1, error=str(e)))
+
+    # --- Reverse tunnel ---
+
+    async def reverse_tunnel(self, to: str, remote_port: int,
+                              local_port: int) -> str:
+        """Request a reverse tunnel: remote peer listens on remote_port
+        and forwards traffic back to our local_port."""
+        target = self._resolve(to)
+        tunnel_id = uuid.uuid4().hex[:8]
+        await self._send(protocol.reverse_tunnel_request(
+            target, tunnel_id, remote_port, local_port))
+        self._tunnels[tunnel_id] = {"local_port": local_port, "type": "reverse"}
+        return tunnel_id
+
+    async def _handle_reverse_tunnel_request(self, data: dict):
+        """Handle incoming reverse tunnel request — start listening on remote_port
+        and relay traffic back to the requester's local_port."""
+        tunnel_id = data["tunnel_id"]
+        remote_port = data["remote_port"]
+        local_port = data.get("local_port", remote_port)
+        from_id = data.get("from", "")
+
+        async def on_connect(reader, writer):
+            """Each TCP connection on remote_port gets relayed back."""
+            conn_tid = f"{tunnel_id}-{uuid.uuid4().hex[:4]}"
+            self._tunnels[conn_tid] = {"reader": reader, "writer": writer}
+            # Open a regular tunnel back to the requester's local_port
+            await self._send(protocol.tunnel_open(from_id, conn_tid, local_port))
+            asyncio.create_task(self._relay_tcp_to_ws(conn_tid, from_id, reader))
+
+        try:
+            server = await asyncio.start_server(
+                on_connect, "127.0.0.1", remote_port)
+            self._tunnels[tunnel_id] = {"server": server, "type": "reverse_listener"}
+            await self._send(protocol.reverse_tunnel_accept(from_id, tunnel_id))
+            print(f"Reverse tunnel {tunnel_id}: listening on :{remote_port} -> {from_id}:{local_port}")
+        except OSError as exc:
+            print(f"Reverse tunnel {tunnel_id}: cannot listen on :{remote_port} — {exc}")
+            await self._send(protocol.tunnel_close(from_id, tunnel_id))
 
     # --- Internal helpers ---
 

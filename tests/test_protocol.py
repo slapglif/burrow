@@ -423,6 +423,12 @@ _ALL_BUILDERS = [
     lambda: protocol.queue_status("q"),
     lambda: protocol.worker_register("w1", ["q"]),
     lambda: protocol.worker_heartbeat("w1"),
+    lambda: protocol.exec_request("p", "e1", "ls -la"),
+    lambda: protocol.exec_request("p", "e1", "ls", cwd="/tmp", env={"FOO": "bar"}),
+    lambda: protocol.exec_response("p", "e1", 0, stdout="ok", stderr=""),
+    lambda: protocol.exec_response("p", "e1", 1, error="failed"),
+    lambda: protocol.reverse_tunnel_request("p", "t1", 2222, 22),
+    lambda: protocol.reverse_tunnel_accept("p", "t1"),
 ]
 
 
@@ -447,7 +453,7 @@ class TestConstants:
         assert protocol.CHUNK_SIZE == 524288
 
     def test_version(self):
-        assert protocol.VERSION == "0.4.0"
+        assert protocol.VERSION == "0.5.0"
 
     def test_keepalive_defaults(self):
         assert protocol.DEFAULT_KEEPALIVE_INTERVAL == 15
@@ -481,6 +487,8 @@ _TYPE_CONSTANTS = [
     protocol.JOB_CANCEL, protocol.JOB_LIST, protocol.JOB_UPDATE,
     protocol.QUEUE_PUSH, protocol.QUEUE_PULL, protocol.QUEUE_ACK,
     protocol.QUEUE_STATUS, protocol.WORKER_REGISTER, protocol.WORKER_HEARTBEAT,
+    protocol.EXEC_REQUEST, protocol.EXEC_RESPONSE,
+    protocol.REVERSE_TUNNEL_REQUEST, protocol.REVERSE_TUNNEL_ACCEPT,
 ]
 
 

@@ -680,6 +680,51 @@ async def burrow_register_worker(queues: str = "", capabilities: str = "") -> st
     return f"Registered as worker for queues: {q_list or 'all'}"
 
 
+# ── Remote Execution ────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_exec(to: str, command: str, timeout_s: float = 60.0,
+                       cwd: str = "", env: str = "{}") -> str:
+    """Execute a shell command on a remote peer. Returns stdout, stderr, exit code.
+    This is like SSH command execution — run any command on any connected peer.
+    env is optional JSON dict of additional environment variables."""
+    if not _peer or not _peer.ws:
+        return "Not connected. Call burrow_connect first."
+    import json as _json
+    try:
+        env_dict = _json.loads(env) if env and env != "{}" else None
+    except _json.JSONDecodeError:
+        env_dict = None
+    result = await _peer.exec_command(
+        to, command, timeout=timeout_s,
+        cwd=cwd or None, env=env_dict)
+    if result.get("error"):
+        return f"Exec error: {result['error']}"
+    parts = [f"Exit code: {result['exit_code']}"]
+    if result.get("stdout"):
+        parts.append(f"stdout:\n{result['stdout']}")
+    if result.get("stderr"):
+        parts.append(f"stderr:\n{result['stderr']}")
+    return "\n".join(parts)
+
+
+@mcp.tool()
+async def burrow_reverse_tunnel(to: str, remote_port: int,
+                                  local_port: int) -> str:
+    """Open a reverse tunnel: the remote peer listens on remote_port
+    and forwards all TCP traffic back to your local_port.
+    Use this for SSH passthrough: burrow_reverse_tunnel(peer, 2222, 22)
+    then SSH to the peer via their port 2222."""
+    if not _peer or not _peer.ws:
+        return "Not connected. Call burrow_connect first."
+    try:
+        tid = await _peer.reverse_tunnel(to, remote_port, local_port)
+        return (f"Reverse tunnel {tid}: {to} listening on :{remote_port} "
+                f"-> your localhost:{local_port}")
+    except Exception as exc:
+        return f"Failed to open reverse tunnel: {exc}"
+
+
 def main():
     mcp.run(transport="stdio")
 

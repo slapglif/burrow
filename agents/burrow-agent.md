@@ -47,6 +47,8 @@ tools:
   - burrow_queue_status
   - burrow_register_worker
   - burrow_submit_script
+  - burrow_exec
+  - burrow_reverse_tunnel
   - Bash
   - Read
 whenToUse: |

@@ -1,0 +1,15 @@
+[Unit]
+Description=Burrow P2P Registry Server
+After=network.target
+
+[Service]
+Type=simple
+User=burrow
+WorkingDirectory=/opt/burrow
+ExecStart=/opt/burrow/.venv/bin/python -m burrow.server --port 7654
+Restart=always
+RestartSec=5
+Environment=BURROW_TOKEN=
+
+[Install]
+WantedBy=multi-user.target
