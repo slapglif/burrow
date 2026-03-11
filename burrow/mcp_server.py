@@ -51,6 +51,12 @@ async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
         _peer = None
         return f"Connection failed: {exc}"
     _listen_task = asyncio.create_task(_peer.run())
+    # Explicitly request peers — the 'registered' response from older servers
+    # may not include the peer list, so always do a fresh request.
+    try:
+        await _peer.request_peers(timeout=3.0)
+    except Exception:
+        pass
     peer_count = len(_peer.peers)
     return f"Connected to {url} as '{_peer.name}' (id={_peer.id}). {peer_count} other peer(s) online."
 
