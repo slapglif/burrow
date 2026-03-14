@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "burrow": {
+      "command": "uv",
+      "args": ["--directory", "/workspace/control-node/burrow", "run", "burrow-mcp"],
+      "env": {},
+      "trust": true
+    }
+  }
+}

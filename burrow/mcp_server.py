@@ -1,8 +1,11 @@
 """Burrow P2P MCP server — exposes peer capabilities as tools for Claude Code agents."""
 
 import asyncio
+import importlib
+import logging
 import os
 import socket
+import sys
 
 from mcp.server.fastmcp import FastMCP
 
@@ -10,17 +13,47 @@ from burrow.peer import Peer
 from burrow.server import serve
 from burrow.protocol import DEFAULT_PORT
 
+log = logging.getLogger("burrow.mcp")
+
 mcp = FastMCP("burrow")
 
 DEFAULT_REGISTRY = "wss://reg.ai-smith.net"
+AUTO_UPDATE = os.environ.get("BURROW_AUTO_UPDATE", "1") != "0"
 
 _peer: Peer | None = None
 _listen_task: asyncio.Task | None = None
 _server_task: asyncio.Task | None = None
+_update_task: asyncio.Task | None = None
 _last_reconnect_id: str | None = None  # Preserved across disconnect/connect cycles
 _connect_url: str = ""
 _connect_name: str | None = None
 _connect_token: str | None = None
+
+
+async def _startup_update():
+    """Check for updates on startup and auto-apply if available."""
+    if not AUTO_UPDATE:
+        return
+    try:
+        from burrow.updater import check_remote_version, self_update, current_version
+        info = await check_remote_version()
+        if info.get("available"):
+            old_ver = info["local_version"]
+            new_ver = info["remote_version"]
+            log.info("Update available: %s -> %s. Auto-updating...", old_ver, new_ver)
+            result = await self_update(force=False)
+            if result["success"]:
+                log.info("Updated to %s (sha=%s)", result["new_version"], result.get("sha"))
+                # Hot-reload the protocol module so VERSION is current
+                import burrow.protocol
+                importlib.reload(burrow.protocol)
+                # Re-import updated version
+                from burrow.protocol import VERSION
+                log.info("Running with version %s", VERSION)
+            else:
+                log.warning("Auto-update failed: %s", result.get("error"))
+    except Exception as e:
+        log.debug("Startup update check failed: %s", e)
 
 
 async def _ensure_connected() -> Peer | None:
@@ -779,7 +812,10 @@ async def burrow_self_update(force: bool = False) -> str:
         return f"Update failed: {result['error']}"
     msg = f"Updated: {result['old_version']} -> {result['new_version']} (sha={result.get('sha', '?')})"
     if result.get("needs_restart"):
-        msg += "\nRestart required to load new version."
+        # Hot-reload protocol to pick up new version
+        import burrow.protocol
+        importlib.reload(burrow.protocol)
+        msg += f"\nHot-reloaded to v{burrow.protocol.VERSION}."
     # Notify peers if connected
     if _peer and _peer.ws:
         try:
@@ -800,6 +836,16 @@ async def burrow_version() -> str:
 
 
 def main():
+    # Run auto-update check before starting the MCP server
+    if AUTO_UPDATE:
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.new_event_loop()
+            loop.run_until_complete(_startup_update())
+            loop.close()
+        except Exception as e:
+            log.debug("Startup update skipped: %s", e)
+
     mcp.run(transport="stdio")
 
 
