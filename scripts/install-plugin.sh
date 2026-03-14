@@ -165,6 +165,31 @@ cat > "$BURROW_DIR/.mcp.json" <<MCPEOF
 MCPEOF
 ok ".mcp.json written with absolute path: $REAL_BURROW_ABS"
 
+# Also write to parent dir if burrow is a subdirectory of a workspace
+# (Claude Code reads .mcp.json from the CWD, which may be the parent)
+PARENT_DIR="$(dirname "$REAL_BURROW_ABS")"
+if [ "$PARENT_DIR" != "$REAL_BURROW_ABS" ] && [ -d "$PARENT_DIR/.git" ] || [ -d "$PARENT_DIR" ]; then
+    PARENT_MCP="$PARENT_DIR/.mcp.json"
+    if [ -f "$PARENT_MCP" ]; then
+        # Merge into existing .mcp.json
+        python3 -c "
+import json
+with open('$PARENT_MCP') as f:
+    data = json.load(f)
+data.setdefault('mcpServers', {})['burrow'] = {
+    'command': 'uv',
+    'args': ['--directory', '$REAL_BURROW_ABS', 'run', 'burrow-mcp'],
+    'env': {}
+}
+with open('$PARENT_MCP', 'w') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null && ok ".mcp.json also updated at $PARENT_MCP"
+    else
+        cp -f "$BURROW_DIR/.mcp.json" "$PARENT_MCP"
+        ok ".mcp.json also written to $PARENT_MCP"
+    fi
+fi
+
 # --- Register MCP server with claude CLI (if available) ---
 if command -v claude &>/dev/null; then
     # Remove existing entry first (ignore errors if it doesn't exist)
