@@ -456,7 +456,7 @@ class TestConstants:
         assert protocol.CHUNK_SIZE == 524288
 
     def test_version(self):
-        assert protocol.VERSION == "0.5.0"
+        assert protocol.VERSION == "0.6.0"
 
     def test_keepalive_defaults(self):
         assert protocol.DEFAULT_KEEPALIVE_INTERVAL == 15
