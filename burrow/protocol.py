@@ -96,6 +96,10 @@ EXEC_RESPONSE = "exec_response"
 REVERSE_TUNNEL_REQUEST = "reverse_tunnel_request"
 REVERSE_TUNNEL_ACCEPT = "reverse_tunnel_accept"
 
+# Self-update / version notifications
+UPDATE_AVAILABLE = "update_available"
+UPDATE_STATUS = "update_status"
+
 
 # --- Builder functions ---
 
@@ -478,3 +482,21 @@ def reverse_tunnel_request(to: str, tunnel_id: str,
 def reverse_tunnel_accept(to: str, tunnel_id: str) -> dict:
     """Accept a reverse tunnel request."""
     return {"type": REVERSE_TUNNEL_ACCEPT, "to": to, "tunnel_id": tunnel_id}
+
+
+# Self-update
+
+def update_available(version: str, current: str,
+                     changelog: str = "", url: str = "") -> dict:
+    """Broadcast that a new version is available."""
+    return {"type": UPDATE_AVAILABLE, "version": version,
+            "current": current, "changelog": changelog, "url": url}
+
+
+def update_status(version: str, status: str,
+                  error: str | None = None) -> dict:
+    """Broadcast update progress/result."""
+    d = {"type": UPDATE_STATUS, "version": version, "status": status}
+    if error:
+        d["error"] = error
+    return d

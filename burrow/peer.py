@@ -95,6 +95,9 @@ class Peer:
         self.exec_enabled = True      # whether to accept incoming exec requests
         self.on_exec_request = None   # (from_name, exec_id, command) -> allow/deny
 
+        # Update notifications
+        self.on_update_available = None  # (version, changelog) -> None
+
     # --- Core lifecycle ---
 
     async def connect(self):
@@ -558,6 +561,21 @@ class Peer:
 
             elif kind == protocol.QUEUE_STATUS:
                 pass  # handled via req_id
+
+            # --- Update notifications ---
+            elif kind == protocol.UPDATE_AVAILABLE:
+                ver = data.get("version", "?")
+                cur = data.get("current", "?")
+                from_name = data.get("from_name", "?")
+                print(f"Update available: {cur} -> {ver} (from {from_name})")
+                if self.on_update_available:
+                    self.on_update_available(ver, data.get("changelog", ""))
+
+            elif kind == protocol.UPDATE_STATUS:
+                ver = data.get("version", "?")
+                status = data.get("status", "?")
+                from_name = data.get("from_name", "?")
+                print(f"Update status from {from_name}: {status} (v{ver})")
 
             # --- Remote execution ---
             elif kind == protocol.EXEC_REQUEST:

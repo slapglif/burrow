@@ -49,6 +49,9 @@ tools:
   - burrow_submit_script
   - burrow_exec
   - burrow_reverse_tunnel
+  - burrow_check_update
+  - burrow_self_update
+  - burrow_version
   - Bash
   - Read
 whenToUse: |

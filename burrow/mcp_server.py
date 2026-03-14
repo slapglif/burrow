@@ -751,6 +751,54 @@ async def burrow_reverse_tunnel(to: str, remote_port: int,
         return f"Failed to open reverse tunnel: {exc}"
 
 
+# ── Self-Update ─────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def burrow_check_update() -> str:
+    """Check if a newer version of burrow is available on GitHub."""
+    from burrow.updater import check_remote_version
+    info = await check_remote_version()
+    if info.get("error"):
+        return f"Check failed: {info['error']}"
+    if info["available"]:
+        lines = [f"Update available: {info['local_version']} -> {info['remote_version']}"]
+        if info.get("changelog"):
+            lines.append(f"Changes:\n{info['changelog']}")
+        return "\n".join(lines)
+    return (f"Up to date: v{info['local_version']} "
+            f"(sha={info.get('sha', '?')}, branch={info.get('branch', '?')})")
+
+
+@mcp.tool()
+async def burrow_self_update(force: bool = False) -> str:
+    """Pull latest code from GitHub and reinstall. Use force=True to override local changes.
+    After update, a restart is needed if the version changed."""
+    from burrow.updater import self_update
+    result = await self_update(force=force)
+    if not result["success"]:
+        return f"Update failed: {result['error']}"
+    msg = f"Updated: {result['old_version']} -> {result['new_version']} (sha={result.get('sha', '?')})"
+    if result.get("needs_restart"):
+        msg += "\nRestart required to load new version."
+    # Notify peers if connected
+    if _peer and _peer.ws:
+        try:
+            from burrow import protocol as proto
+            await _peer._send(proto.update_status(
+                result["new_version"], "updated"))
+        except Exception:
+            pass
+    return msg
+
+
+@mcp.tool()
+async def burrow_version() -> str:
+    """Show the current burrow version, git SHA, and branch."""
+    from burrow.updater import current_version, git_current_sha, git_current_branch
+    return (f"burrow v{current_version()} "
+            f"(sha={git_current_sha()}, branch={git_current_branch()})")
+
+
 def main():
     mcp.run(transport="stdio")
 

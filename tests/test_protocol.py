@@ -429,6 +429,9 @@ _ALL_BUILDERS = [
     lambda: protocol.exec_response("p", "e1", 1, error="failed"),
     lambda: protocol.reverse_tunnel_request("p", "t1", 2222, 22),
     lambda: protocol.reverse_tunnel_accept("p", "t1"),
+    lambda: protocol.update_available("0.6.0", "0.5.0", changelog="fixes"),
+    lambda: protocol.update_status("0.6.0", "updated"),
+    lambda: protocol.update_status("0.6.0", "failed", error="git pull failed"),
 ]
 
 
@@ -489,6 +492,7 @@ _TYPE_CONSTANTS = [
     protocol.QUEUE_STATUS, protocol.WORKER_REGISTER, protocol.WORKER_HEARTBEAT,
     protocol.EXEC_REQUEST, protocol.EXEC_RESPONSE,
     protocol.REVERSE_TUNNEL_REQUEST, protocol.REVERSE_TUNNEL_ACCEPT,
+    protocol.UPDATE_AVAILABLE, protocol.UPDATE_STATUS,
 ]
 
 
