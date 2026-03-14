@@ -18,6 +18,25 @@ _peer: Peer | None = None
 _listen_task: asyncio.Task | None = None
 _server_task: asyncio.Task | None = None
 _last_reconnect_id: str | None = None  # Preserved across disconnect/connect cycles
+_connect_url: str = ""
+_connect_name: str | None = None
+_connect_token: str | None = None
+
+
+async def _ensure_connected() -> Peer | None:
+    """Check if peer is connected; auto-reconnect if the listen task died."""
+    global _peer, _listen_task
+    if _peer and _peer.ws and _listen_task and not _listen_task.done():
+        return _peer
+    if _peer and _listen_task and _listen_task.done():
+        # Listen task crashed — restart it
+        try:
+            _listen_task = asyncio.create_task(_peer.run())
+            await asyncio.sleep(0.1)  # Let reconnect start
+            return _peer
+        except Exception:
+            pass
+    return None
 
 
 # ── Core ────────────────────────────────────────────────────────────────────
@@ -38,13 +57,17 @@ async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
     """Connect to a burrow registry and register as a peer.
     Provide token if the server requires authentication.
     Auto-reconnects on connection loss."""
-    global _peer, _listen_task, _last_reconnect_id
+    global _peer, _listen_task, _last_reconnect_id, _connect_url, _connect_name, _connect_token
     if _peer and _peer.ws:
         return f"Already connected as '{_peer.name}' (id={_peer.id}). Disconnect first."
     if name is None:
         name = socket.gethostname()
     if token is None:
         token = os.environ.get("BURROW_TOKEN")
+    # Save connection params for auto-reconnect
+    _connect_url = url
+    _connect_name = name
+    _connect_token = token
     _peer = Peer(url, name, token=token, auto_reconnect=True)
     # Reuse previous peer ID so the server allows name reuse after disconnect
     if _last_reconnect_id:
@@ -54,6 +77,7 @@ async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
     except Exception as exc:
         _peer = None
         return f"Connection failed: {exc}"
+    # run() skips initial connect() since we already connected above
     _listen_task = asyncio.create_task(_peer.run())
     # Explicitly request peers — the 'registered' response from older servers
     # may not include the peer list, so always do a fresh request.

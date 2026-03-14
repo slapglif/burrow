@@ -132,11 +132,19 @@ class Peer:
             self._cleanup()
 
     async def run(self):
-        """Connect + listen with auto-reconnect."""
+        """Connect + listen with auto-reconnect and state restoration."""
         delay = self.BACKOFF_BASE
+        first_run = True
         while not self._stop_event.is_set():
             try:
-                await self.connect()
+                if first_run and self.ws:
+                    # Already connected (caller did connect() before run())
+                    first_run = False
+                else:
+                    first_run = False
+                    await self.connect()
+                    # Restore state after reconnect
+                    await self._restore_state()
                 delay = self.BACKOFF_BASE
                 await self.listen()
             except (websockets.ConnectionClosed, ConnectionError, OSError) as exc:
@@ -160,12 +168,53 @@ class Peer:
             except Exception:
                 pass
 
+    async def _restore_state(self):
+        """Re-join groups, re-announce capabilities, and refresh peers after reconnect."""
+        # Re-join all groups we were in
+        for group in list(self.groups):
+            try:
+                await self._send(protocol.group_join(group))
+            except Exception:
+                pass
+        # Re-announce capabilities if we had any
+        if self.capabilities:
+            try:
+                await self._send(protocol.capability_announce(self.capabilities))
+            except Exception:
+                pass
+        # Refresh peer list
+        try:
+            await self.request_peers(timeout=3.0)
+        except Exception:
+            pass
+        print(f"Reconnected as '{self.name}' (id={self.id})")
+
     def _cleanup(self):
+        """Clean up transient state — preserve groups/capabilities for reconnect."""
         self._transfers.clear()
         for tunnel in self._tunnels.values():
             if tunnel.get("writer"):
                 tunnel["writer"].close()
+            if tunnel.get("server"):
+                tunnel["server"].close()
         self._tunnels.clear()
+        # Cancel all pending futures so callers don't hang
+        for fut in self._pending_acks.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("disconnected"))
+        self._pending_acks.clear()
+        for fut in self._pending_requests.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("disconnected"))
+        self._pending_requests.clear()
+        for fut in self._job_results.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("disconnected"))
+        self._job_results.clear()
+        for fut in self._exec_results.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("disconnected"))
+        self._exec_results.clear()
 
     async def _keepalive_loop(self):
         while True:
