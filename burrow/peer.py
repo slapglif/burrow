@@ -16,7 +16,11 @@ from burrow import protocol
 from burrow.distributed import JobExecutor, JobState
 
 
-RECEIVE_DIR = Path("./burrow-received")
+RECEIVE_DIR = Path(__file__).parent.parent / "burrow-received"
+
+# Safe environment variables to pass to exec/script execution
+_SAFE_ENV_KEYS = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
+                  "PYTHONPATH", "VIRTUAL_ENV", "UV_CACHE_DIR"}
 
 
 class Peer:
@@ -374,10 +378,16 @@ class Peer:
                 entry["chunks"].append(data["data"])
                 if data.get("final"):
                     raw_bytes = b"".join(base64.b64decode(c) for c in entry["chunks"])
-                    RECEIVE_DIR.mkdir(parents=True, exist_ok=True)
+                    RECEIVE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
                     safe_name = Path(entry["name"]).name or f"unnamed-{tid}"
                     dest = RECEIVE_DIR / safe_name
-                    dest.write_bytes(raw_bytes)
+                    # Verify path stays within RECEIVE_DIR
+                    if not dest.resolve().is_relative_to(RECEIVE_DIR.resolve()):
+                        print(f"Rejected file with unsafe name: {entry['name']}")
+                        del self._transfers[tid]
+                        continue
+                    await asyncio.to_thread(dest.write_bytes, raw_bytes)
+                    dest.chmod(0o600)  # Owner read/write only
                     print(f"Received file {safe_name} from {entry['from_name']}")
                     if self.on_file:
                         self.on_file(entry["from_name"], str(dest))
@@ -594,7 +604,7 @@ class Peer:
     async def send_file(self, to: str, filepath: str):
         target = self._resolve(to)
         path = Path(filepath)
-        raw_bytes = path.read_bytes()
+        raw_bytes = await asyncio.to_thread(path.read_bytes)
         size = len(raw_bytes)
         name = path.name
         transfer_id = uuid.uuid4().hex[:8]
@@ -789,13 +799,14 @@ class Peer:
         task_id = uuid.uuid4().hex[:8]
         self._broadcast_responses[task_id] = []
         self._broadcast_events[task_id] = asyncio.Event()
-        await self._send(protocol.task_broadcast(task_id, task, timeout_s, required_skills))
         try:
+            await self._send(protocol.task_broadcast(task_id, task, timeout_s, required_skills))
             await asyncio.wait_for(self._broadcast_events[task_id].wait(), timeout=timeout_s)
         except asyncio.TimeoutError:
             pass
-        responses = self._broadcast_responses.pop(task_id, [])
-        self._broadcast_events.pop(task_id, None)
+        finally:
+            responses = self._broadcast_responses.pop(task_id, [])
+            self._broadcast_events.pop(task_id, None)
         return responses
 
     # --- Task delegation ---
@@ -808,13 +819,14 @@ class Peer:
         self._delegated_tasks[task_id] = {
             "to": to, "task": task, "status": "pending", "result": None}
         self._task_events[task_id] = asyncio.Event()
-        await self._send(protocol.task_assign(target, task_id, task, priority, context))
         try:
+            await self._send(protocol.task_assign(target, task_id, task, priority, context))
             await asyncio.wait_for(self._task_events[task_id].wait(), timeout=timeout_s)
         except asyncio.TimeoutError:
             self._delegated_tasks[task_id]["status"] = "timeout"
-        result = self._delegated_tasks.pop(task_id, {})
-        self._task_events.pop(task_id, None)
+        finally:
+            result = self._delegated_tasks.pop(task_id, {})
+            self._task_events.pop(task_id, None)
         return result
 
     async def report_task_status(self, to: str, task_id: str, status: str,
@@ -833,12 +845,13 @@ class Peer:
         vote_id = uuid.uuid4().hex[:8]
         self._active_votes[vote_id] = {
             "votes": [], "event": asyncio.Event(), "proposal": proposal}
-        await self._send(protocol.vote_propose(vote_id, proposal, options, deadline_s))
         try:
+            await self._send(protocol.vote_propose(vote_id, proposal, options, deadline_s))
             await asyncio.wait_for(self._active_votes[vote_id]["event"].wait(), timeout=deadline_s)
         except asyncio.TimeoutError:
             pass
-        votes = self._active_votes.pop(vote_id, {}).get("votes", [])
+        finally:
+            votes = self._active_votes.pop(vote_id, {}).get("votes", [])
         tally = {}
         for v in votes:
             tally[v["choice"]] = tally.get(v["choice"], 0) + 1
@@ -887,10 +900,10 @@ class Peer:
         target = self._resolve(to)
         fut = asyncio.get_running_loop().create_future()
         self._job_results[job_id] = fut
-        await self._send(protocol.job_submit(
-            target, job_id, runtime, func,
-            args=args, kwargs=kwargs, resources=resources))
         try:
+            await self._send(protocol.job_submit(
+                target, job_id, runtime, func,
+                args=args, kwargs=kwargs, resources=resources))
             result = await asyncio.wait_for(fut, timeout)
             return result
         except asyncio.TimeoutError:
@@ -911,17 +924,18 @@ class Peer:
         path = Path(script_path)
         if not path.exists():
             raise FileNotFoundError(f"Script not found: {script_path}")
-        script_content = base64.b64encode(path.read_bytes()).decode()
+        raw = await asyncio.to_thread(path.read_bytes)
+        script_content = base64.b64encode(raw).decode()
         script_name = path.name
 
         job_id = uuid.uuid4().hex[:8]
         target = self._resolve(to)
         fut = asyncio.get_running_loop().create_future()
         self._job_results[job_id] = fut
-        await self._send(protocol.job_submit(
-            target, job_id, runtime, f"__script__:{script_name}",
-            args=args or [], script=script_content, script_name=script_name))
         try:
+            await self._send(protocol.job_submit(
+                target, job_id, runtime, f"__script__:{script_name}",
+                args=args or [], script=script_content, script_name=script_name))
             result = await asyncio.wait_for(fut, timeout)
             return result
         except asyncio.TimeoutError:
@@ -1043,15 +1057,22 @@ class Peer:
     async def _run_script_job(self, job_id: str, script_b64: str,
                                script_name: str, args: list, from_id: str):
         """Write a script to temp dir and execute it as a subprocess."""
-        import subprocess
+        import shutil
         import tempfile
 
+        # Sanitize script name — prevent path traversal
+        script_name = Path(script_name).name
+        if not script_name or "/" in script_name or "\\" in script_name:
+            script_name = "script.py"
+
+        script_dir = None
+        proc = None
         try:
             script_bytes = base64.b64decode(script_b64)
             script_dir = Path(tempfile.mkdtemp(prefix="burrow-scripts-"))
             script_path = script_dir / script_name
-            script_path.write_bytes(script_bytes)
-            script_path.chmod(0o755)
+            await asyncio.to_thread(script_path.write_bytes, script_bytes)
+            script_path.chmod(0o700)  # Owner-only execute
 
             # Determine how to run the script
             if script_name.endswith(".py"):
@@ -1083,11 +1104,26 @@ class Peer:
                     error=f"exit code {proc.returncode}: {err_output.strip()}",
                     result=output.strip()))
         except asyncio.TimeoutError:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except Exception:
+                    pass
             await self._send(protocol.job_result(
                 from_id, job_id, "failed", error="script timed out (300s)"))
         except Exception as e:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             await self._send(protocol.job_result(
                 from_id, job_id, "failed", error=str(e)))
+        finally:
+            # Always clean up temp directory
+            if script_dir and script_dir.exists():
+                shutil.rmtree(script_dir, ignore_errors=True)
 
     # --- Server-side queue ---
 
@@ -1207,8 +1243,10 @@ class Peer:
                 return
 
         print(f"Exec [{exec_id}] from {from_name}: {command[:80]}")
+        proc = None
         try:
-            env = dict(os.environ)
+            # Whitelist safe env vars only — don't leak secrets
+            env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
             if env_override:
                 env.update(env_override)
 
@@ -1229,10 +1267,22 @@ class Peer:
                 stderr=stderr.decode(errors="replace")))
 
         except asyncio.TimeoutError:
+            # Kill the process to prevent zombies
+            if proc:
+                try:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except Exception:
+                    pass
             await self._send(protocol.exec_response(
                 from_id, exec_id, exit_code=-1,
                 error=f"command timed out ({timeout_s}s)"))
         except Exception as e:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             await self._send(protocol.exec_response(
                 from_id, exec_id, exit_code=-1, error=str(e)))
 
@@ -1286,6 +1336,8 @@ class Peer:
         return name_or_id
 
     async def _send(self, msg: dict):
+        if not self.ws:
+            raise ConnectionError("Not connected")
         await self.ws.send(json.dumps(msg))
 
     async def _relay_tcp_to_ws(self, tunnel_id: str, target: str,
@@ -1300,11 +1352,18 @@ class Peer:
         except (ConnectionError, asyncio.CancelledError):
             pass
         finally:
-            await self._send(protocol.tunnel_close(target, tunnel_id))
+            # Always close the writer, even if _send fails
             tunnel = self._tunnels.pop(tunnel_id, None)
             if tunnel and tunnel.get("writer"):
                 tunnel["writer"].close()
-                await tunnel["writer"].wait_closed()
+                try:
+                    await tunnel["writer"].wait_closed()
+                except Exception:
+                    pass
+            try:
+                await self._send(protocol.tunnel_close(target, tunnel_id))
+            except Exception:
+                pass
 
     async def _handle_tunnel_open(self, data: dict):
         tid = data["tunnel_id"]

@@ -127,7 +127,6 @@ def resolve_id(target: str) -> str | None:
         if info["name"].lower() == low:
             return info["id"]
     # Check offline peers
-    low = target.lower()
     for name, pid in name_to_id.items():
         if name.lower() == low:
             return pid
@@ -557,6 +556,7 @@ async def handler(ws):
                 case "task_broadcast":
                     inject_sender(msg, ws, peer_id)
                     req_skills = set(msg.get("required_skills", []))
+                    raw = json.dumps(msg)  # Pre-serialize once
                     for w, info in list(peers.items()):
                         if w is ws:
                             continue
@@ -565,17 +565,18 @@ async def handler(ws):
                             if not req_skills.issubset(peer_skills):
                                 continue
                         try:
-                            await w.send(json.dumps(msg))
+                            await w.send(raw)
                         except Exception:
                             pass
 
                 # ---- Broadcast types (vote_propose, vote_result, election) ----
                 case _ if t in BROADCAST_TYPES:
                     inject_sender(msg, ws, peer_id)
+                    raw = json.dumps(msg)  # Pre-serialize once
                     for w in list(peers):
                         if w is not ws:
                             try:
-                                await w.send(json.dumps(msg))
+                                await w.send(raw)
                             except Exception:
                                 pass
 
@@ -654,6 +655,10 @@ async def _queue_cleanup():
         for pid in expired:
             last_seen.pop(pid, None)
             message_queues.pop(pid, None)
+        # Clean up stale workers and old queue results
+        work_queue.cleanup_stale_workers(timeout=300)
+        work_queue.results = {k: v for k, v in work_queue.results.items()
+                              if now - v.submitted_at < 3600}
 
 
 async def serve(host="0.0.0.0", port=DEFAULT_PORT):

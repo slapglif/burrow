@@ -370,10 +370,12 @@ async def burrow_get_pending_tasks() -> str:
         return "Not connected."
     if not _peer.pending_tasks:
         return "No pending tasks."
+    tasks = _peer.pending_tasks[:]
+    _peer.pending_tasks.clear()  # Clear after reading to prevent unbounded growth
     lines = []
-    for t in _peer.pending_tasks:
+    for t in tasks:
         lines.append(f"  [{t['type']}] {t['task_id']} from {t['from_name']}: {t['task']}")
-    return f"{len(_peer.pending_tasks)} pending task(s):\n" + "\n".join(lines)
+    return f"{len(tasks)} pending task(s):\n" + "\n".join(lines)
 
 
 # ── Voting / Consensus ──────────────────────────────────────────────────────

@@ -691,5 +691,11 @@ class JobExecutor:
                 to_remove.append(jid)
         for jid in to_remove:
             del self.jobs[jid]
+        # Also clean up batch references to deleted jobs
+        for batch_id in list(self.batches.keys()):
+            self.batches[batch_id] = [jid for jid in self.batches[batch_id]
+                                       if jid in self.jobs]
+            if not self.batches[batch_id]:
+                del self.batches[batch_id]
         log.info("Purged %d jobs", len(to_remove))
         return len(to_remove)
