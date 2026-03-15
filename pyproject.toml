@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "burrow"
-version = "0.6.0"
+version = "0.6.1"
 description = "Zero-config P2P networking: discovery, messaging, file transfer, tunneling"
 license = "MIT"
 requires-python = ">=3.11"
