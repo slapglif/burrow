@@ -29,6 +29,12 @@ _connect_url: str = ""
 _connect_name: str | None = None
 _connect_token: str | None = None
 
+NOT_CONNECTED = (
+    "Not connected to the burrow swarm. "
+    "Call burrow_connect() first — no arguments needed, it auto-connects to wss://reg.ai-smith.net. "
+    "Typical workflow: burrow_connect() → burrow_list_peers() → burrow_join_group('agent-pool') → collaborate."
+)
+
 
 async def _startup_update():
     """Check for updates on startup and auto-apply if available."""
@@ -44,10 +50,8 @@ async def _startup_update():
             result = await self_update(force=False)
             if result["success"]:
                 log.info("Updated to %s (sha=%s)", result["new_version"], result.get("sha"))
-                # Hot-reload the protocol module so VERSION is current
                 import burrow.protocol
                 importlib.reload(burrow.protocol)
-                # Re-import updated version
                 from burrow.protocol import VERSION
                 log.info("Running with version %s", VERSION)
             else:
@@ -56,19 +60,41 @@ async def _startup_update():
         log.debug("Startup update check failed: %s", e)
 
 
-async def _ensure_connected() -> Peer | None:
-    """Check if peer is connected; auto-reconnect if the listen task died."""
-    global _peer, _listen_task
-    if _peer and _peer.ws and _listen_task and not _listen_task.done():
-        return _peer
-    if _peer and _listen_task and _listen_task.done():
-        # Listen task crashed — restart it
-        try:
+async def _auto_connect() -> Peer | None:
+    """Auto-connect if not connected. Returns peer or None."""
+    global _peer, _listen_task, _last_reconnect_id
+    if _peer and _peer.ws:
+        # Check if listen task died and restart it
+        if _listen_task and _listen_task.done():
             _listen_task = asyncio.create_task(_peer.run())
-            await asyncio.sleep(0.1)  # Let reconnect start
-            return _peer
-        except Exception:
-            pass
+            await asyncio.sleep(0.1)
+        return _peer
+    # Auto-connect
+    name = socket.gethostname()
+    token = os.environ.get("BURROW_TOKEN")
+    _peer = Peer(DEFAULT_REGISTRY, name, token=token, auto_reconnect=True)
+    if _last_reconnect_id:
+        _peer._reconnect_id = _last_reconnect_id
+    try:
+        await _peer.connect()
+    except Exception:
+        _peer = None
+        return None
+    _listen_task = asyncio.create_task(_peer.run())
+    try:
+        await _peer.request_peers(timeout=3.0)
+    except Exception:
+        pass
+    return _peer
+
+
+def _validate_to(to: str) -> str | None:
+    """Validate 'to' parameter. Returns error message or None if valid."""
+    if not to or not to.strip():
+        return (
+            "Error: 'to' parameter is empty. You must specify a peer name or ID. "
+            "Use burrow_list_peers() to see who is online and get their name/ID."
+        )
     return None
 
 
@@ -76,50 +102,57 @@ async def _ensure_connected() -> Peer | None:
 
 @mcp.tool()
 async def burrow_serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> str:
-    """Start a burrow registry server in the background."""
+    """Start a local burrow registry server in the background.
+    Only needed if you want your own private registry — most users should just call burrow_connect() to join the public swarm."""
     global _server_task
     if _server_task and not _server_task.done():
         return f"Registry server already running on {host}:{port}."
     _server_task = asyncio.create_task(serve(host, port))
-    return f"Registry server started on ws://{host}:{port}"
+    return f"Registry server started on ws://{host}:{port}. Connect with: burrow_connect(url='ws://{host}:{port}')"
 
 
 @mcp.tool()
 async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
                           token: str | None = None) -> str:
-    """Connect to a burrow registry and register as a peer.
-    Provide token if the server requires authentication.
-    Auto-reconnects on connection loss."""
+    """Connect to the burrow P2P swarm. No arguments needed — auto-connects to the public registry.
+    After connecting, use burrow_list_peers() to see who's online, and burrow_join_group('agent-pool') to join the coordination group."""
     global _peer, _listen_task, _last_reconnect_id, _connect_url, _connect_name, _connect_token
     if _peer and _peer.ws:
-        return f"Already connected as '{_peer.name}' (id={_peer.id}). Disconnect first."
+        peers = len(_peer.peers)
+        groups = list(_peer.groups)
+        msg = f"Already connected as '{_peer.name}' (id={_peer.id}). {peers} peer(s) online."
+        if groups:
+            msg += f" In groups: {', '.join(groups)}."
+        else:
+            msg += " Tip: join a group with burrow_join_group('agent-pool')."
+        return msg
     if name is None:
         name = socket.gethostname()
     if token is None:
         token = os.environ.get("BURROW_TOKEN")
-    # Save connection params for auto-reconnect
     _connect_url = url
     _connect_name = name
     _connect_token = token
     _peer = Peer(url, name, token=token, auto_reconnect=True)
-    # Reuse previous peer ID so the server allows name reuse after disconnect
     if _last_reconnect_id:
         _peer._reconnect_id = _last_reconnect_id
     try:
         await _peer.connect()
     except Exception as exc:
         _peer = None
-        return f"Connection failed: {exc}"
-    # run() skips initial connect() since we already connected above
+        return f"Connection failed: {exc}. Check your network or try again."
     _listen_task = asyncio.create_task(_peer.run())
-    # Explicitly request peers — the 'registered' response from older servers
-    # may not include the peer list, so always do a fresh request.
     try:
         await _peer.request_peers(timeout=3.0)
     except Exception:
         pass
     peer_count = len(_peer.peers)
-    return f"Connected to {url} as '{_peer.name}' (id={_peer.id}). {peer_count} other peer(s) online."
+    msg = f"Connected to {url} as '{_peer.name}' (id={_peer.id}). {peer_count} other peer(s) online."
+    if peer_count > 0:
+        names = list(_peer.peers.values())[:5]
+        msg += f"\nPeers: {', '.join(names)}"
+    msg += "\nNext: burrow_list_peers() to see details, or burrow_join_group('agent-pool') to join the coordination group."
+    return msg
 
 
 @mcp.tool()
@@ -127,32 +160,33 @@ async def burrow_disconnect() -> str:
     """Disconnect from the burrow registry."""
     global _peer, _listen_task, _last_reconnect_id
     if not _peer or not _peer.ws:
-        return "Not connected."
+        return "Not connected (nothing to disconnect)."
     name = _peer.name
-    # Preserve reconnect ID so we can reclaim the same name on next connect
     _last_reconnect_id = _peer._reconnect_id or _peer.id
     await _peer.stop()
     _peer = None
     _listen_task = None
-    return f"Disconnected '{name}' from registry."
+    return f"Disconnected '{name}' from registry. Call burrow_connect() to reconnect."
 
 
 @mcp.tool()
 async def burrow_list_peers() -> str:
-    """List all peers currently connected to the registry, including their status and capabilities."""
-    if not _peer or not _peer.ws:
-        return "Not connected. Call burrow_connect first."
+    """List all peers currently connected to the registry, with their status and capabilities.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     try:
-        await _peer.request_peers()
+        await peer.request_peers()
     except Exception as exc:
-        return f"Failed to request peers: {exc}"
-    if not _peer.peers:
-        return "No other peers online."
+        return f"Failed to request peers: {exc}. Try burrow_disconnect() then burrow_connect()."
+    if not peer.peers:
+        return "No other peers online. You're the only one connected. Share the join instructions (prompt.md) with other agents."
     lines = []
-    for pid, pname in _peer.peers.items():
-        status = _peer.peer_status.get(pid, {}).get("status", "?")
-        task = _peer.peer_status.get(pid, {}).get("task", "")
-        caps = _peer.peer_capabilities.get(pid, {})
+    for pid, pname in peer.peers.items():
+        status = peer.peer_status.get(pid, {}).get("status", "?")
+        task = peer.peer_status.get(pid, {}).get("task", "")
+        caps = peer.peer_capabilities.get(pid, {})
         cap_str = ""
         if caps:
             skills = caps.get("skills", [])
@@ -170,27 +204,37 @@ async def burrow_list_peers() -> str:
 
 @mcp.tool()
 async def burrow_send_message(to: str, body: str) -> str:
-    """Send a text message to a peer by name or id. Returns delivery status."""
-    if not _peer or not _peer.ws:
-        return "Not connected. Call burrow_connect first."
+    """Send a text message to a peer by name or ID. Returns delivery status.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     try:
-        result = await _peer.send_message(to, body)
+        result = await peer.send_message(to, body)
     except Exception as exc:
         return f"Failed to send message: {exc}"
     if result == "delivered":
         return f"Message delivered to '{to}'."
     elif result == "queued":
-        return f"'{to}' is offline. Message queued for delivery when they reconnect."
+        return f"'{to}' is offline. Message queued for delivery when they reconnect (up to 5 min)."
     return f"Message to '{to}': {result}"
 
 
 @mcp.tool()
 async def burrow_send_file(to: str, filepath: str) -> str:
-    """Send a file to a peer by name or id."""
-    if not _peer or not _peer.ws:
-        return "Not connected. Call burrow_connect first."
+    """Send a file to a peer by name or ID.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     try:
-        await _peer.send_file(to, filepath)
+        await peer.send_file(to, filepath)
     except FileNotFoundError:
         return f"File not found: {filepath}"
     except Exception as exc:
@@ -200,11 +244,16 @@ async def burrow_send_file(to: str, filepath: str) -> str:
 
 @mcp.tool()
 async def burrow_open_tunnel(to: str, local_port: int, remote_port: int) -> str:
-    """Open a TCP tunnel: localhost:local_port forwards to peer's localhost:remote_port."""
-    if not _peer or not _peer.ws:
-        return "Not connected. Call burrow_connect first."
+    """Open a TCP tunnel: localhost:local_port forwards to peer's localhost:remote_port.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     try:
-        await _peer.open_tunnel(to, local_port, remote_port)
+        await peer.open_tunnel(to, local_port, remote_port)
     except Exception as exc:
         return f"Failed to open tunnel: {exc}"
     return f"Tunnel open: localhost:{local_port} -> {to}:{remote_port}"
@@ -217,10 +266,11 @@ async def burrow_announce_capabilities(
     tools: str = "", model: str = "", skills: str = "",
     tags: str = "", status: str = "idle"
 ) -> str:
-    """Announce this agent's capabilities to the swarm.
-    Comma-separated lists for tools, skills, tags."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    """Announce this agent's capabilities to the swarm so other peers can discover you.
+    Comma-separated lists for tools, skills, tags. Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     caps = {"status": status}
     if tools:
         caps["tools"] = [t.strip() for t in tools.split(",")]
@@ -230,23 +280,25 @@ async def burrow_announce_capabilities(
         caps["skills"] = [s.strip() for s in skills.split(",")]
     if tags:
         caps["tags"] = [t.strip() for t in tags.split(",")]
-    await _peer.announce_capabilities(caps)
-    return f"Capabilities announced: {caps}"
+    await peer.announce_capabilities(caps)
+    return f"Capabilities announced: {caps}. Other peers can now find you with burrow_find_peers()."
 
 
 @mcp.tool()
 async def burrow_find_peers(
     required_tools: str = "", required_skills: str = "", required_tags: str = ""
 ) -> str:
-    """Find peers matching capability requirements. Comma-separated lists."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    """Find peers matching capability requirements. Comma-separated lists.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     tools = [t.strip() for t in required_tools.split(",") if t.strip()] or None
     skills = [s.strip() for s in required_skills.split(",") if s.strip()] or None
     tags = [t.strip() for t in required_tags.split(",") if t.strip()] or None
-    matches = await _peer.query_capabilities(tools, skills, tags)
+    matches = await peer.query_capabilities(tools, skills, tags)
     if not matches:
-        return "No matching peers found."
+        return "No matching peers found. Peers must call burrow_announce_capabilities() to be discoverable."
     lines = []
     for m in matches:
         caps = m.get("capabilities", {})
@@ -257,10 +309,12 @@ async def burrow_find_peers(
 
 @mcp.tool()
 async def burrow_update_status(status: str, task: str = "") -> str:
-    """Update presence status. Status: idle, busy, working. Task: description of current work."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    await _peer.update_status(status, task)
+    """Update presence status. Status: idle, busy, working. Task: description of current work.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    await peer.update_status(status, task)
     return f"Status updated: {status}" + (f" ({task})" if task else "")
 
 
@@ -268,29 +322,40 @@ async def burrow_update_status(status: str, task: str = "") -> str:
 
 @mcp.tool()
 async def burrow_join_group(group: str) -> str:
-    """Join a named group/channel. Messages can be broadcast to all group members."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    await _peer.join_group(group)
-    return f"Joined group '{group}'."
+    """Join a named group/channel. Groups are created automatically when the first peer joins.
+    Messages can be broadcast to all group members. Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    if not group or not group.strip():
+        return "Error: group name cannot be empty. Common groups: 'agent-pool', 'dev', 'tasks'."
+    await peer.join_group(group)
+    return (f"Joined group '{group}'. "
+            f"Use burrow_group_message('{group}', 'hello') to message the group, "
+            f"or burrow_group_members('{group}') to see who's in it.")
 
 
 @mcp.tool()
 async def burrow_leave_group(group: str) -> str:
     """Leave a group/channel."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    await _peer.leave_group(group)
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    await peer.leave_group(group)
     return f"Left group '{group}'."
 
 
 @mcp.tool()
 async def burrow_group_message(group: str, body: str) -> str:
-    """Send a message to all members of a group."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    """Send a message to all members of a group. You must join the group first with burrow_join_group().
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    if group not in peer.groups:
+        await peer.join_group(group)
     try:
-        await _peer.send_group_message(group, body, wait_ack=True)
+        await peer.send_group_message(group, body, wait_ack=True)
     except Exception as exc:
         return f"Failed: {exc}"
     return f"Message sent to group '{group}'."
@@ -298,59 +363,83 @@ async def burrow_group_message(group: str, body: str) -> str:
 
 @mcp.tool()
 async def burrow_list_groups() -> str:
-    """List all active groups and their member counts."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    groups = await _peer.list_groups()
+    """List all active groups and their member counts. Groups only exist while they have members —
+    if this returns empty, create one with burrow_join_group('agent-pool').
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    groups = await peer.list_groups()
     if not groups:
-        return "No active groups."
+        return ("No active groups. Groups are created when the first peer joins. "
+                "Create one with: burrow_join_group('agent-pool')")
     lines = [f"  {name}: {count} member(s)" for name, count in groups.items()]
-    return f"{len(groups)} group(s):\n" + "\n".join(lines)
+    msg = f"{len(groups)} group(s):\n" + "\n".join(lines)
+    # Check which ones we're in
+    my_groups = peer.groups
+    if my_groups:
+        msg += f"\nYou are in: {', '.join(my_groups)}"
+    else:
+        msg += "\nYou haven't joined any groups yet. Use burrow_join_group() to join one."
+    return msg
 
 
 @mcp.tool()
 async def burrow_group_members(group: str) -> str:
-    """List members of a specific group."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    members = await _peer.get_group_members(group)
+    """List members of a specific group.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    members = await peer.get_group_members(group)
     if not members:
-        return f"No members in group '{group}' (or group doesn't exist)."
+        return (f"No members in group '{group}'. Either the group doesn't exist yet, "
+                f"or everyone left. Join it with: burrow_join_group('{group}')")
     lines = [f"  {m['name']} ({m['id']}) [{m.get('status', '?')}]" for m in members]
-    return f"{len(members)} member(s) in '{group}':\n" + "\n".join(lines)
+    in_group = group in peer.groups
+    msg = f"{len(members)} member(s) in '{group}':\n" + "\n".join(lines)
+    if not in_group:
+        msg += f"\nNote: You are NOT in this group. Join with: burrow_join_group('{group}')"
+    return msg
 
 
 # ── Shared State ────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def burrow_state_set(key: str, value: str, group: str = "") -> str:
-    """Set a shared key-value pair visible to all peers (or group members if group specified)."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    await _peer.set_state(key, value, group or None)
+    """Set a shared key-value pair visible to all peers (or group members if group specified).
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    await peer.set_state(key, value, group or None)
     scope = f"group '{group}'" if group else "global"
     return f"State set: {key} = {value} ({scope})"
 
 
 @mcp.tool()
 async def burrow_state_get(key: str, group: str = "") -> str:
-    """Get a shared state value by key."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    value = await _peer.get_state(key, group or None)
+    """Get a shared state value by key.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    value = await peer.get_state(key, group or None)
     if value is None:
-        return f"Key '{key}' not found."
+        return f"Key '{key}' not found. Use burrow_state_set() to create it, or burrow_state_sync() to see all keys."
     return f"{key} = {value}"
 
 
 @mcp.tool()
 async def burrow_state_sync(group: str = "") -> str:
-    """Sync all shared state from the server. Returns the full key-value store."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    state = await _peer.sync_state(group or None)
+    """Sync all shared state from the server. Returns the full key-value store.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    state = await peer.sync_state(group or None)
     if not state:
-        return "No shared state."
+        return "No shared state. Use burrow_state_set(key, value) to create entries."
     lines = [f"  {k} = {v}" for k, v in state.items()]
     scope = f"group '{group}'" if group else "global"
     return f"Shared state ({scope}, {len(state)} keys):\n" + "\n".join(lines)
@@ -361,13 +450,17 @@ async def burrow_state_sync(group: str = "") -> str:
 @mcp.tool()
 async def burrow_broadcast_task(task: str, timeout_s: float = 30.0,
                                  required_skills: str = "") -> str:
-    """Broadcast a task to all peers (optionally filtered by skills) and collect responses."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    """Broadcast a task to all peers (optionally filtered by skills) and collect responses.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    if not peer.peers:
+        return "No peers online to broadcast to. Wait for peers to connect, or check with burrow_list_peers()."
     skills = [s.strip() for s in required_skills.split(",") if s.strip()] or None
-    responses = await _peer.broadcast_task(task, timeout_s, skills)
+    responses = await peer.broadcast_task(task, timeout_s, skills)
     if not responses:
-        return "No responses received."
+        return "No responses received. Peers may not have a task handler registered. Try burrow_delegate_task() to target a specific peer."
     lines = [f"  {r['from']}: {r['response']}" for r in responses]
     return f"{len(responses)} response(s):\n" + "\n".join(lines)
 
@@ -375,40 +468,53 @@ async def burrow_broadcast_task(task: str, timeout_s: float = 30.0,
 @mcp.tool()
 async def burrow_delegate_task(to: str, task: str, context: str = "",
                                 timeout_s: float = 120.0) -> str:
-    """Delegate a task to a specific peer and wait for result."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    """Delegate a task to a specific peer and wait for result.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     ctx = {"description": context} if context else {}
-    result = await _peer.delegate_task(to, task, context=ctx, timeout_s=timeout_s)
+    result = await peer.delegate_task(to, task, context=ctx, timeout_s=timeout_s)
     status = result.get("status", "unknown")
     if status == "timeout":
-        return f"Task timed out after {timeout_s}s."
+        return f"Task timed out after {timeout_s}s. The peer may be busy or not handling tasks. Check with burrow_list_peers()."
     return f"Task {status}: {result.get('result', 'no result')}"
 
 
 @mcp.tool()
 async def burrow_return_result(to: str, task_id: str, result: str,
                                 success: bool = True) -> str:
-    """Return a result for a delegated task back to the assigning peer."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    await _peer.return_task_result(to, task_id, result, success)
+    """Return a result for a delegated task back to the assigning peer.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    await peer.return_task_result(to, task_id, result, success)
     return f"Result sent for task {task_id}."
 
 
 @mcp.tool()
 async def burrow_get_pending_tasks() -> str:
-    """Get pending tasks that have been assigned or broadcast to this agent."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    if not _peer.pending_tasks:
-        return "No pending tasks."
-    tasks = _peer.pending_tasks[:]
-    _peer.pending_tasks.clear()  # Clear after reading to prevent unbounded growth
+    """Get pending tasks that have been assigned or broadcast to this agent.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    if not peer.pending_tasks:
+        return "No pending tasks. Tasks arrive when another peer calls burrow_delegate_task() or burrow_broadcast_task() targeting you."
+    tasks = peer.pending_tasks[:]
+    peer.pending_tasks.clear()
     lines = []
     for t in tasks:
         lines.append(f"  [{t['type']}] {t['task_id']} from {t['from_name']}: {t['task']}")
-    return f"{len(tasks)} pending task(s):\n" + "\n".join(lines)
+    return (f"{len(tasks)} pending task(s):\n" + "\n".join(lines) +
+            "\nUse burrow_return_result(to, task_id, result) to respond.")
 
 
 # ── Voting / Consensus ──────────────────────────────────────────────────────
@@ -416,11 +522,15 @@ async def burrow_get_pending_tasks() -> str:
 @mcp.tool()
 async def burrow_propose_vote(proposal: str, options: str = "approve,reject,abstain",
                                deadline_s: float = 30.0) -> str:
-    """Propose a vote to all peers. Options are comma-separated."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    """Propose a vote to all peers. Options are comma-separated.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    if not peer.peers:
+        return "No peers online to vote. Wait for peers to connect first."
     opt_list = [o.strip() for o in options.split(",")]
-    result = await _peer.propose_vote(proposal, opt_list, deadline_s)
+    result = await peer.propose_vote(proposal, opt_list, deadline_s)
     tally_str = ", ".join(f"{k}: {v}" for k, v in result["tally"].items())
     return (f"Vote complete. Outcome: {result['outcome']}\n"
             f"Tally ({result['total']} votes): {tally_str}")
@@ -429,10 +539,15 @@ async def burrow_propose_vote(proposal: str, options: str = "approve,reject,abst
 @mcp.tool()
 async def burrow_cast_vote(to: str, vote_id: str, choice: str,
                             reason: str = "") -> str:
-    """Cast a vote on a proposal from another peer."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    await _peer.cast_vote(to, vote_id, choice, reason)
+    """Cast a vote on a proposal from another peer.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    await peer.cast_vote(to, vote_id, choice, reason)
     return f"Vote '{choice}' cast on {vote_id}."
 
 
@@ -440,24 +555,28 @@ async def burrow_cast_vote(to: str, vote_id: str, choice: str,
 
 @mcp.tool()
 async def burrow_elect_leader() -> str:
-    """Trigger a leader election in the swarm. Returns the elected leader."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    result = await _peer.start_election()
-    if result["leader_id"] == _peer.id:
-        return f"This agent was elected leader (id={_peer.id})."
+    """Trigger a leader election in the swarm. Returns the elected leader.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    result = await peer.start_election()
+    if result["leader_id"] == peer.id:
+        return f"This agent was elected leader (id={peer.id})."
     return f"Leader elected: {result['leader_name']} (id={result['leader_id']})"
 
 
 @mcp.tool()
 async def burrow_get_leader() -> str:
-    """Return the current swarm leader."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    if not _peer.leader_id:
-        return "No leader elected yet. Call burrow_elect_leader."
-    is_me = " (this agent)" if _peer.is_leader else ""
-    return f"Leader: {_peer.leader_name} (id={_peer.leader_id}){is_me}"
+    """Return the current swarm leader.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    if not peer.leader_id:
+        return "No leader elected yet. Call burrow_elect_leader() to start an election."
+    is_me = " (this agent)" if peer.is_leader else ""
+    return f"Leader: {peer.leader_name} (id={peer.leader_id}){is_me}"
 
 
 # ── Distributed Jobs ───────────────────────────────────────────────────────
@@ -466,19 +585,23 @@ async def burrow_get_leader() -> str:
 async def burrow_submit_job(to: str, func: str, args: str = "[]",
                              kwargs: str = "{}", runtime: str = "builtin",
                              timeout_s: float = 120.0) -> str:
-    """Submit a distributed job to a peer. func is 'module.function' path.
-    Runtime: 'builtin' (in-process), 'ray', or 'dask'.
-    Args/kwargs as JSON strings. Returns job result."""
-    if not _peer or not _peer.ws:
-        return "Not connected. Call burrow_connect first."
+    """Submit a distributed job to a peer. func is 'module.function' path (e.g. 'math.factorial').
+    Runtime: 'builtin' (default), 'ray', or 'dask'. Args/kwargs as JSON strings.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     import json as _json
     try:
         parsed_args = _json.loads(args)
         parsed_kwargs = _json.loads(kwargs)
     except _json.JSONDecodeError as e:
-        return f"Invalid JSON: {e}"
+        return f"Invalid JSON: {e}. Args must be a JSON array like '[1, 2]', kwargs a JSON object like '{{}}'."
     try:
-        result = await _peer.submit_job(
+        result = await peer.submit_job(
             to, func, args=parsed_args, kwargs=parsed_kwargs,
             runtime=runtime, timeout=timeout_s)
         status = result.get("status", "unknown")
@@ -487,7 +610,7 @@ async def burrow_submit_job(to: str, func: str, args: str = "[]",
         elif status == "failed":
             return f"Job failed: {result.get('error', 'unknown error')}"
         elif status == "timeout":
-            return f"Job timed out after {timeout_s}s. Job ID: {result.get('job_id')}"
+            return f"Job timed out after {timeout_s}s. Job ID: {result.get('job_id')}. The peer may be overloaded."
         return f"Job status: {status}. Result: {result}"
     except Exception as exc:
         return f"Failed to submit job: {exc}"
@@ -495,30 +618,42 @@ async def burrow_submit_job(to: str, func: str, args: str = "[]",
 
 @mcp.tool()
 async def burrow_job_status(to: str, job_id: str) -> str:
-    """Check the status of a previously submitted job."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    result = await _peer.check_job_status(to, job_id)
+    """Check the status of a previously submitted job.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    result = await peer.check_job_status(to, job_id)
     return f"Job {job_id}: {result.get('status', 'unknown')}"
 
 
 @mcp.tool()
 async def burrow_cancel_job(to: str, job_id: str) -> str:
-    """Cancel a running job on a peer."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    await _peer.cancel_job(to, job_id)
+    """Cancel a running job on a peer.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    await peer.cancel_job(to, job_id)
     return f"Cancel request sent for job {job_id}."
 
 
 @mcp.tool()
 async def burrow_list_jobs() -> str:
-    """List all jobs tracked by the server."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    jobs = await _peer.list_all_jobs()
+    """List all jobs tracked by the server.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    jobs = await peer.list_all_jobs()
     if not jobs:
-        return "No jobs tracked."
+        return "No jobs tracked. Submit one with burrow_submit_job()."
     lines = []
     for j in jobs:
         if j:
@@ -529,26 +664,29 @@ async def burrow_list_jobs() -> str:
 
 @mcp.tool()
 async def burrow_init_runtime(runtime: str, address: str = "") -> str:
-    """Initialize a distributed runtime: 'ray' or 'dask'.
-    Optionally provide scheduler/cluster address."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    """Initialize a distributed runtime: 'ray' or 'dask'. Optionally provide scheduler/cluster address.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     addr = address or None
     if runtime == "ray":
-        ok = _peer.init_ray(addr)
-        return f"Ray {'connected' if ok else 'failed to connect'}."
+        ok = peer.init_ray(addr)
+        return f"Ray {'initialized successfully' if ok else 'failed — is ray installed? pip install ray[default]'}."
     elif runtime == "dask":
-        ok = _peer.init_dask(addr)
-        return f"Dask {'connected' if ok else 'failed to connect'}."
+        ok = peer.init_dask(addr)
+        return f"Dask {'initialized successfully' if ok else 'failed — is dask installed? pip install dask[distributed]'}."
     return f"Unknown runtime: {runtime}. Use 'ray' or 'dask'."
 
 
 @mcp.tool()
 async def burrow_available_runtimes() -> str:
-    """List available distributed runtimes on this peer."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    runtimes = _peer.available_runtimes
+    """List available distributed runtimes on this peer.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    runtimes = peer.available_runtimes
     return f"Available runtimes: {', '.join(runtimes)}"
 
 
@@ -556,20 +694,22 @@ async def burrow_available_runtimes() -> str:
 async def burrow_submit_script(to: str, script_path: str, args: str = "[]",
                                 timeout_s: float = 300.0) -> str:
     """Upload a local script file to a remote peer and execute it.
-
     Supports .py (Python), .sh (Bash), or any executable.
-    The script is transferred inline and run in a temp directory on the peer.
     Args is a JSON array of command-line arguments.
-    Returns stdout/stderr from the script execution."""
-    if not _peer or not _peer.ws:
-        return "Not connected. Call burrow_connect first."
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     import json as _json
     try:
         parsed_args = _json.loads(args)
     except _json.JSONDecodeError as e:
-        return f"Invalid JSON args: {e}"
+        return f"Invalid JSON args: {e}. Must be a JSON array like '[\"--verbose\"]'."
     try:
-        result = await _peer.submit_script(
+        result = await peer.submit_script(
             to, script_path, args=parsed_args, timeout=timeout_s)
         status = result.get("status", "unknown")
         if status in ("completed", "finished"):
@@ -585,7 +725,7 @@ async def burrow_submit_script(to: str, script_path: str, args: str = "[]",
             return f"Script timed out after {timeout_s}s. Job ID: {result.get('job_id')}"
         return f"Script status: {status}"
     except FileNotFoundError:
-        return f"Script not found: {script_path}"
+        return f"Script not found: {script_path}. Provide an absolute path to the script file."
     except Exception as exc:
         return f"Failed to submit script: {exc}"
 
@@ -596,18 +736,22 @@ async def burrow_submit_batch(to: str, func: str, args_list: str,
                                max_retries: int = 0) -> str:
     """Submit a batch of jobs to a peer. args_list is JSON array of arg arrays.
     Example: '[[1],[2],[3]]' submits 3 jobs with different args.
-    Returns batch_id and per-job status."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     import json as _json
     try:
         parsed = _json.loads(args_list)
     except _json.JSONDecodeError as e:
-        return f"Invalid JSON: {e}"
+        return f"Invalid JSON: {e}. Must be a JSON array of arrays like '[[1],[2],[3]]'."
     results = []
     for i, args in enumerate(parsed):
         try:
-            r = await _peer.submit_job(to, func, args=args, runtime=runtime, timeout=120.0)
+            r = await peer.submit_job(to, func, args=args, runtime=runtime, timeout=120.0)
             results.append(f"  [{i}] {r.get('status','?')}: {r.get('result', r.get('error',''))}")
         except Exception as exc:
             results.append(f"  [{i}] error: {exc}")
@@ -619,18 +763,23 @@ async def burrow_map_job(to: str, func: str, inputs: str,
                           runtime: str = "builtin") -> str:
     """Map a function over a list of inputs on a remote peer.
     inputs is a JSON array. Each element is passed as a single arg.
-    Example: func='math.factorial', inputs='[5,10,20]'"""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    Example: func='math.factorial', inputs='[5,10,20]'
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     import json as _json
     try:
         parsed = _json.loads(inputs)
     except _json.JSONDecodeError as e:
-        return f"Invalid JSON: {e}"
+        return f"Invalid JSON: {e}. Must be a JSON array like '[5, 10, 20]'."
     results = []
     for inp in parsed:
         try:
-            r = await _peer.submit_job(to, func, args=[inp], runtime=runtime, timeout=60.0)
+            r = await peer.submit_job(to, func, args=[inp], runtime=runtime, timeout=60.0)
             results.append(r.get("result", r.get("error", "?")))
         except Exception as exc:
             results.append(f"error: {exc}")
@@ -640,31 +789,37 @@ async def burrow_map_job(to: str, func: str, inputs: str,
 
 @mcp.tool()
 async def burrow_job_logs(job_id: str) -> str:
-    """Get execution logs for a local job."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    logs = _peer._executor.get_job_logs(job_id)
+    """Get execution logs for a local job.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    logs = peer._executor.get_job_logs(job_id)
     if not logs:
-        return f"No logs for job {job_id}."
+        return f"No logs for job {job_id}. The job may not exist or may have been purged."
     return f"Logs for {job_id}:\n" + "\n".join(f"  {l}" for l in logs)
 
 
 @mcp.tool()
 async def burrow_job_stats() -> str:
-    """Get aggregate statistics for all local jobs."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    """Get aggregate statistics for all local jobs.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     import json as _json
-    stats = _peer._executor.stats()
+    stats = peer._executor.stats()
     return f"Job statistics:\n{_json.dumps(stats, indent=2)}"
 
 
 @mcp.tool()
 async def burrow_purge_jobs(status: str = "") -> str:
-    """Remove completed/failed/cancelled jobs from local tracking."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    count = _peer._executor.purge(status=status or None)
+    """Remove completed/failed/cancelled jobs from local tracking.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    count = peer._executor.purge(status=status or None)
     return f"Purged {count} jobs."
 
 
@@ -673,51 +828,60 @@ async def burrow_purge_jobs(status: str = "") -> str:
 @mcp.tool()
 async def burrow_queue_push(queue: str, payload: str, priority: int = 0) -> str:
     """Push a job to a named server-side work queue. Payload is JSON.
-    Workers pull jobs from the queue and report results."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    Workers pull jobs from the queue and report results.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     import json as _json
     try:
         data = _json.loads(payload)
     except _json.JSONDecodeError as e:
-        return f"Invalid JSON payload: {e}"
-    job_id = await _peer.queue_push(queue, data, priority)
-    return f"Job {job_id} pushed to queue '{queue}' (priority={priority})."
+        return f"Invalid JSON payload: {e}. Must be valid JSON like '{{\"task\": \"build\"}}'."
+    job_id = await peer.queue_push(queue, data, priority)
+    return f"Job {job_id} pushed to queue '{queue}' (priority={priority}). Workers can pull it with burrow_queue_pull('{queue}')."
 
 
 @mcp.tool()
 async def burrow_queue_pull(queue: str) -> str:
-    """Pull the next available job from a server-side work queue."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    item = await _peer.queue_pull(queue)
+    """Pull the next available job from a server-side work queue.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    item = await peer.queue_pull(queue)
     if not item:
-        return f"No jobs available in queue '{queue}'."
+        return f"No jobs available in queue '{queue}'. Push one with burrow_queue_push('{queue}', '{{\"task\":\"...\"}}')"
     import json as _json
     return (f"Job {item['job_id']} from queue '{queue}':\n"
             f"  Payload: {_json.dumps(item.get('payload', {}))}\n"
-            f"  Priority: {item.get('priority', 0)}")
+            f"  Priority: {item.get('priority', 0)}\n"
+            f"When done, acknowledge with: burrow_queue_ack('{queue}', '{item['job_id']}', 'result here')")
 
 
 @mcp.tool()
 async def burrow_queue_ack(queue: str, job_id: str, result: str = "",
                             success: bool = True) -> str:
-    """Acknowledge completion of a queue job. Reports result back to submitter."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    await _peer.queue_ack(queue, job_id, result=result or None, success=success)
+    """Acknowledge completion of a queue job. Reports result back to submitter.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    await peer.queue_ack(queue, job_id, result=result or None, success=success)
     status = "completed" if success else "failed"
     return f"Job {job_id} acknowledged as {status}."
 
 
 @mcp.tool()
 async def burrow_queue_status(queue: str = "") -> str:
-    """Get status of server-side work queues."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
-    status = await _peer.queue_status(queue or None)
+    """Get status of server-side work queues.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    status = await peer.queue_status(queue or None)
     if not status:
-        return "No queues active."
+        return "No queues active. Create one by pushing a job: burrow_queue_push('my-queue', '{\"task\":\"...\"}')"
     import json as _json
     return f"Queue status:\n{_json.dumps(status, indent=2)}"
 
@@ -725,9 +889,11 @@ async def burrow_queue_status(queue: str = "") -> str:
 @mcp.tool()
 async def burrow_register_worker(queues: str = "", capabilities: str = "") -> str:
     """Register this agent as a worker for server-side queues.
-    Comma-separated queue names and capabilities."""
-    if not _peer or not _peer.ws:
-        return "Not connected."
+    Comma-separated queue names and capabilities.
+    Auto-connects if not already connected."""
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     q_list = [q.strip() for q in queues.split(",") if q.strip()] or None
     caps = {}
     if capabilities:
@@ -735,8 +901,9 @@ async def burrow_register_worker(queues: str = "", capabilities: str = "") -> st
             cap = cap.strip()
             if cap:
                 caps[cap] = True
-    await _peer.register_worker(q_list, caps or None)
-    return f"Registered as worker for queues: {q_list or 'all'}"
+    await peer.register_worker(q_list, caps or None)
+    return (f"Registered as worker for queues: {q_list or 'all'}. "
+            f"Pull work with burrow_queue_pull('queue-name').")
 
 
 # ── Remote Execution ────────────────────────────────────────────────────────
@@ -745,16 +912,20 @@ async def burrow_register_worker(queues: str = "", capabilities: str = "") -> st
 async def burrow_exec(to: str, command: str, timeout_s: float = 60.0,
                        cwd: str = "", env: str = "{}") -> str:
     """Execute a shell command on a remote peer. Returns stdout, stderr, exit code.
-    This is like SSH command execution — run any command on any connected peer.
-    env is optional JSON dict of additional environment variables."""
-    if not _peer or not _peer.ws:
-        return "Not connected. Call burrow_connect first."
+    Like SSH but over the P2P relay — no port forwarding needed.
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     import json as _json
     try:
         env_dict = _json.loads(env) if env and env != "{}" else None
     except _json.JSONDecodeError:
         env_dict = None
-    result = await _peer.exec_command(
+    result = await peer.exec_command(
         to, command, timeout=timeout_s,
         cwd=cwd or None, env=env_dict)
     if result.get("error"):
@@ -772,12 +943,16 @@ async def burrow_reverse_tunnel(to: str, remote_port: int,
                                   local_port: int) -> str:
     """Open a reverse tunnel: the remote peer listens on remote_port
     and forwards all TCP traffic back to your local_port.
-    Use this for SSH passthrough: burrow_reverse_tunnel(peer, 2222, 22)
-    then SSH to the peer via their port 2222."""
-    if not _peer or not _peer.ws:
-        return "Not connected. Call burrow_connect first."
+    Example for SSH: burrow_reverse_tunnel('peer', 2222, 22)
+    Auto-connects if not already connected."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
     try:
-        tid = await _peer.reverse_tunnel(to, remote_port, local_port)
+        tid = await peer.reverse_tunnel(to, remote_port, local_port)
         return (f"Reverse tunnel {tid}: {to} listening on :{remote_port} "
                 f"-> your localhost:{local_port}")
     except Exception as exc:
@@ -797,6 +972,7 @@ async def burrow_check_update() -> str:
         lines = [f"Update available: {info['local_version']} -> {info['remote_version']}"]
         if info.get("changelog"):
             lines.append(f"Changes:\n{info['changelog']}")
+        lines.append("Run burrow_self_update() to apply.")
         return "\n".join(lines)
     return (f"Up to date: v{info['local_version']} "
             f"(sha={info.get('sha', '?')}, branch={info.get('branch', '?')})")
@@ -805,18 +981,16 @@ async def burrow_check_update() -> str:
 @mcp.tool()
 async def burrow_self_update(force: bool = False) -> str:
     """Pull latest code from GitHub and reinstall. Use force=True to override local changes.
-    After update, a restart is needed if the version changed."""
+    After update, the new version is hot-reloaded."""
     from burrow.updater import self_update
     result = await self_update(force=force)
     if not result["success"]:
         return f"Update failed: {result['error']}"
     msg = f"Updated: {result['old_version']} -> {result['new_version']} (sha={result.get('sha', '?')})"
     if result.get("needs_restart"):
-        # Hot-reload protocol to pick up new version
         import burrow.protocol
         importlib.reload(burrow.protocol)
         msg += f"\nHot-reloaded to v{burrow.protocol.VERSION}."
-    # Notify peers if connected
     if _peer and _peer.ws:
         try:
             from burrow import protocol as proto
@@ -836,7 +1010,6 @@ async def burrow_version() -> str:
 
 
 def main():
-    # Run auto-update check before starting the MCP server
     if AUTO_UPDATE:
         import asyncio as _asyncio
         try:
