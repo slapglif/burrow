@@ -47,7 +47,7 @@ async def _startup_update():
             old_ver = info["local_version"]
             new_ver = info["remote_version"]
             log.info("Update available: %s -> %s. Auto-updating...", old_ver, new_ver)
-            result = await self_update(force=False)
+            result = await self_update(force=True)
             if result["success"]:
                 log.info("Updated to %s (sha=%s)", result["new_version"], result.get("sha"))
                 import burrow.protocol

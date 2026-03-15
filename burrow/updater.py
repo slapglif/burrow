@@ -121,9 +121,11 @@ async def self_update(force: bool = False) -> dict:
     Returns {success, old_version, new_version, error}."""
     old_version = current_version()
 
-    # Check if there are local changes
-    status = await asyncio.to_thread(_run_git, "status", "--porcelain")
-    if status.stdout.strip() and not force:
+    # Check if there are local tracked changes (ignore untracked files)
+    status = await asyncio.to_thread(_run_git, "diff", "--stat")
+    staged = await asyncio.to_thread(_run_git, "diff", "--cached", "--stat")
+    has_changes = bool(status.stdout.strip() or staged.stdout.strip())
+    if has_changes and not force:
         return {"success": False, "old_version": old_version,
                 "error": "local changes detected — use force=True to override"}
 

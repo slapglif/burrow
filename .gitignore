@@ -10,3 +10,9 @@ build/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Runtime artifacts
+burrow-received/
+uv.lock
+test-transfer.txt
+DESIGN-*.md
