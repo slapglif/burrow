@@ -60,14 +60,31 @@ async def _startup_update():
         log.debug("Startup update check failed: %s", e)
 
 
+async def _ensure_listen_loop() -> bool:
+    """Ensure the background listen loop is running. Returns True if healthy."""
+    global _listen_task
+    if not _peer or not _peer.ws:
+        return False
+    if _listen_task and not _listen_task.done():
+        return True
+    # Listen task is dead or never started — (re)start it
+    if _listen_task and _listen_task.done():
+        # Check if it raised an exception
+        try:
+            _listen_task.result()
+        except Exception as e:
+            log.debug("Listen task died: %s. Restarting.", e)
+    _listen_task = asyncio.create_task(_peer.run())
+    # Give it a moment to start consuming messages
+    await asyncio.sleep(0.05)
+    return True
+
+
 async def _auto_connect() -> Peer | None:
     """Auto-connect if not connected. Returns peer or None."""
     global _peer, _listen_task, _last_reconnect_id
     if _peer and _peer.ws:
-        # Check if listen task died and restart it
-        if _listen_task and _listen_task.done():
-            _listen_task = asyncio.create_task(_peer.run())
-            await asyncio.sleep(0.1)
+        await _ensure_listen_loop()
         return _peer
     # Auto-connect
     name = socket.gethostname()
@@ -81,6 +98,8 @@ async def _auto_connect() -> Peer | None:
         _peer = None
         return None
     _listen_task = asyncio.create_task(_peer.run())
+    # Let the listen loop start before any request-response calls
+    await asyncio.sleep(0.05)
     try:
         await _peer.request_peers(timeout=3.0)
     except Exception:
@@ -142,6 +161,8 @@ async def burrow_connect(url: str = DEFAULT_REGISTRY, name: str | None = None,
         _peer = None
         return f"Connection failed: {exc}. Check your network or try again."
     _listen_task = asyncio.create_task(_peer.run())
+    # Let the listen loop start before any request-response calls
+    await asyncio.sleep(0.05)
     try:
         await _peer.request_peers(timeout=3.0)
     except Exception:
@@ -220,6 +241,10 @@ async def burrow_send_message(to: str, body: str) -> str:
         return f"Message delivered to '{to}'."
     elif result == "queued":
         return f"'{to}' is offline. Message queued for delivery when they reconnect (up to 5 min)."
+    elif result == "timeout":
+        return (f"Message sent to '{to}' but delivery confirmation timed out. "
+                f"The message was likely delivered or queued by the server. "
+                f"This can happen if the listen loop is restarting. Try burrow_list_peers() to verify the peer is online.")
     return f"Message to '{to}': {result}"
 
 

@@ -162,6 +162,15 @@ class Peer:
                 print(f"Connection lost ({exc}). Reconnecting in {wait:.1f}s...")
                 await asyncio.sleep(wait)
                 delay = min(delay * self.BACKOFF_FACTOR, self.BACKOFF_MAX)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Catch ALL exceptions so the loop doesn't die silently
+                if not self.auto_reconnect or self._stop_event.is_set():
+                    raise
+                print(f"Listen loop error ({type(exc).__name__}: {exc}). Reconnecting in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+                delay = min(delay * self.BACKOFF_FACTOR, self.BACKOFF_MAX)
             finally:
                 self._cleanup()
 
