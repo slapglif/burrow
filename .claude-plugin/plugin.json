@@ -1,6 +1,6 @@
 {
   "name": "burrow",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Zero-config P2P networking \u2014 connect agents to a swarm for messaging, file transfer, and tunneling",
   "author": {
     "name": "slapglif"
