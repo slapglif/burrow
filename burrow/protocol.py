@@ -96,6 +96,16 @@ EXEC_RESPONSE = "exec_response"
 REVERSE_TUNNEL_REQUEST = "reverse_tunnel_request"
 REVERSE_TUNNEL_ACCEPT = "reverse_tunnel_accept"
 
+# Remote desktop + computer use
+DESKTOP_SESSION_OPEN = "desktop_session_open"
+DESKTOP_SESSION_READY = "desktop_session_ready"
+DESKTOP_SESSION_CLOSE = "desktop_session_close"
+DESKTOP_SESSION_LIST = "desktop_session_list"
+DESKTOP_FRAME_REQUEST = "desktop_frame_request"
+DESKTOP_FRAME = "desktop_frame"
+DESKTOP_INPUT = "desktop_input"
+DESKTOP_PERMISSION = "desktop_permission"
+
 # Self-update / version notifications
 UPDATE_AVAILABLE = "update_available"
 UPDATE_STATUS = "update_status"
@@ -482,6 +492,77 @@ def reverse_tunnel_request(to: str, tunnel_id: str,
 def reverse_tunnel_accept(to: str, tunnel_id: str) -> dict:
     """Accept a reverse tunnel request."""
     return {"type": REVERSE_TUNNEL_ACCEPT, "to": to, "tunnel_id": tunnel_id}
+
+
+# Remote desktop + computer use
+
+def desktop_session_open(to: str, session_id: str, *, backend: str = "auto",
+                         readonly: bool = False, remote_port: int = 0,
+                         display: str | None = None,
+                         target: dict | None = None,
+                         permissions: dict | None = None,
+                         privacy: dict | None = None,
+                         resume_token: str | None = None,
+                         resume_epoch: int | None = None) -> dict:
+    d = {"type": DESKTOP_SESSION_OPEN, "to": to, "session_id": session_id,
+         "backend": backend, "readonly": readonly, "remote_port": remote_port}
+    if display is not None:
+        d["display"] = display
+    if target is not None:
+        d["target"] = target
+    if permissions is not None:
+        d["permissions"] = permissions
+    if privacy is not None:
+        d["privacy"] = privacy
+    if resume_token:
+        d["resume_token"] = resume_token
+    if resume_epoch is not None:
+        d["resume_epoch"] = resume_epoch
+    return d
+
+
+def desktop_session_ready(to: str, session_id: str, session: dict) -> dict:
+    return {"type": DESKTOP_SESSION_READY, "to": to, "session_id": session_id,
+            "session": session}
+
+
+def desktop_session_close(to: str, session_id: str) -> dict:
+    return {"type": DESKTOP_SESSION_CLOSE, "to": to, "session_id": session_id}
+
+
+def desktop_session_list(to: str | None = None, *, req_id: str | None = None,
+                         sessions: list[dict] | None = None) -> dict:
+    d = {"type": DESKTOP_SESSION_LIST}
+    if to is not None:
+        d["to"] = to
+    if req_id:
+        d["req_id"] = req_id
+    if sessions is not None:
+        d["sessions"] = sessions
+    return d
+
+
+def desktop_frame_request(to: str, session_id: str) -> dict:
+    return {"type": DESKTOP_FRAME_REQUEST, "to": to, "session_id": session_id}
+
+
+def desktop_frame(to: str, session_id: str, frame: dict) -> dict:
+    return {"type": DESKTOP_FRAME, "to": to, "session_id": session_id,
+            "frame": frame}
+
+
+def desktop_input(to: str, session_id: str, action: dict) -> dict:
+    return {"type": DESKTOP_INPUT, "to": to, "session_id": session_id,
+            "action": action}
+
+
+def desktop_permission(to: str, session_id: str, permission: dict,
+                       transition: dict | None = None) -> dict:
+    d = {"type": DESKTOP_PERMISSION, "to": to, "session_id": session_id,
+         "permission": permission}
+    if transition is not None:
+        d["transition"] = transition
+    return d
 
 
 # Self-update

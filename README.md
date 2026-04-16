@@ -19,6 +19,7 @@ Burrow is a zero-config P2P relay that lets agents and devices discover each oth
 - **Messaging** — text messages with ACK/NACK delivery confirmation, offline queuing
 - **File Transfer** — chunked base64 transfer of any size
 - **TCP Tunneling** — forward local ports through the relay
+- **Remote Desktop Orchestration** — prefer the native sidecar when present, otherwise launch tunneled xpra/x11vnc/wayvnc sessions on remote peers with a RustDesk-inspired control/media split
 - **Groups & Channels** — named channels with scoped messaging and state
 - **Shared State** — distributed key-value store (global or group-scoped)
 - **Task Coordination** — broadcast tasks, delegate work, collect results
@@ -88,6 +89,22 @@ burrow serve --port 7654
 | `/quit` | Disconnect |
 
 Peers can be referenced by name (case-insensitive) or by ID.
+
+### Remote desktop support matrix
+
+What is real today:
+
+| Surface | Current state |
+|---------|---------------|
+| Native sidecar selection | Preferred automatically when `burrow-rd-host` is installed and starts successfully |
+| Native display enumeration | Real Linux enumeration via sidecar capability probe (`xrandr`-backed today) when available |
+| Native snapshot/input transport | Routed through the Python bridge and MCP/CLI session model |
+| Native capture pixels | Sidecar-dependent; current in-repo sidecar may still report stubbed frames |
+| Native input execution | Sidecar-dependent; current sidecar may still accept actions with stubbed acknowledgements |
+| Clipboard sync | Not exposed as control-plane read/write yet; MCP/CLI only send clipboard-oriented shortcuts or typed text, and true clipboard behavior depends on backend/sidecar support |
+| xpra/x11vnc/wayvnc backends | Still available as honest fallbacks when native is missing or unsuitable |
+
+Truthfulness note: Burrow now surfaces sidecar capability state, display targets, and stub/unsupported clipboard details to CLI/MCP responses. Do not treat clipboard, capture, or input as fully native unless the reported capability payload says they are available.
 
 ## Claude Code Plugin
 

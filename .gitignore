@@ -16,3 +16,32 @@ burrow-received/
 uv.lock
 test-transfer.txt
 DESIGN-*.md
+
+# Android workspace build artifacts and local IDE files
+android/.gradle/
+android/build/
+android/.idea/
+android/*.iml
+android/local.properties
+android/app/build/
+
+# Python cache / runtime artifacts
+__pycache__/
+burrow/__pycache__/
+tests/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Rust/Native build artifacts
+native/target/
+native/.cargo/
+
+# Node/tooling detritus (if using frontend helpers)
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+node_modules/

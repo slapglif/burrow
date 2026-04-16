@@ -1,0 +1,3 @@
+[workspace]
+members = ["burrow-rd-host"]
+resolver = "2"

@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 import logging
 import os
 import socket
@@ -9,6 +10,7 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
+from burrow.computer_use import normalize_action
 from burrow.peer import Peer
 from burrow.server import serve
 from burrow.protocol import DEFAULT_PORT
@@ -115,6 +117,93 @@ def _validate_to(to: str) -> str | None:
             "Use burrow_list_peers() to see who is online and get their name/ID."
         )
     return None
+
+
+def _json_reply(payload) -> str:
+    return json.dumps(payload, sort_keys=True)
+
+
+def _desktop_target_from_args(display: str = "", target_json: str = "") -> dict | None:
+    if target_json:
+        payload = json.loads(target_json)
+        if not isinstance(payload, dict):
+            raise ValueError("target_json must decode to an object")
+        return payload
+    if display:
+        return {"kind": "display", "id": display, "title": display}
+    return None
+
+
+def _annotate_desktop_session(session: dict) -> dict:
+    annotated = dict(session)
+    viewer = dict(annotated.get("viewer") or {})
+    if viewer:
+        annotated["viewer"] = viewer
+    target = annotated.get("target")
+    viewer_display = viewer.get("display")
+    if not target and viewer_display:
+        annotated["target"] = {"kind": "display", "id": viewer_display, "title": viewer_display}
+    computer_use = dict(annotated.get("computer_use") or {})
+    computer_use.setdefault("clipboard_actions", ["copy", "cut", "paste", "paste_text", "select_all"])
+    annotated["computer_use"] = computer_use
+    capabilities = dict(annotated.get("capabilities") or {})
+    clipboard_details = dict(annotated.get("clipboard_details") or {})
+    capabilities.setdefault("clipboard_surface", {
+        "native_backend": bool(clipboard_details.get("available")) or bool(capabilities.get("clipboard")),
+        "stubbed": bool(clipboard_details.get("stubbed", False)),
+        "control_plane_read_write": False,
+        "synchronized": False,
+        "thin_actions": ["copy", "cut", "paste", "paste_text", "select_all"],
+        "note": "Clipboard sync depends on sidecar/backend support. Burrow MCP currently exposes clipboard-oriented actions only; it does not read clipboard contents through the control plane.",
+    })
+    if annotated.get("display_label"):
+        capabilities.setdefault("display_label", annotated["display_label"])
+    annotated["capabilities"] = capabilities
+    return annotated
+
+
+def _annotate_desktop_capabilities(info: dict) -> dict:
+    annotated = dict(info)
+    native = dict(annotated.get("native") or {})
+    display_targets = list(annotated.get("display_targets") or native.get("display_targets") or [])
+    clipboard_surface = dict(annotated.get("clipboard_surface") or native.get("clipboard_surface") or {})
+    annotated["surface"] = {
+        "display_targeting": {
+            "open_parameter": "display",
+            "target_json_supported": True,
+            "enumeration_available": bool(display_targets),
+            "display_targets": display_targets,
+        },
+        "clipboard": {
+            "native_backend_depends_on_backend": True,
+            "native_backend": bool(clipboard_surface.get("native_backend")),
+            "stubbed": bool(clipboard_surface.get("stubbed", False)),
+            "control_plane_read_write": False,
+            "thin_actions": ["copy", "cut", "paste", "paste_text", "select_all"],
+            "synchronized": False,
+            "note": clipboard_surface.get("note") or "Clipboard sync depends on backend support and is not exposed as control-plane read/write yet.",
+        },
+    }
+    return annotated
+
+
+def _build_clipboard_action(action: str, text: str = "") -> dict:
+    payload = {
+        "copy": {"type": "clipboard_copy"},
+        "cut": {"type": "clipboard_cut"},
+        "paste": {"type": "clipboard_paste"},
+        "select_all": {"type": "select_all"},
+        "paste_text": {"type": "clipboard_paste_text", "text": text},
+    }.get(action)
+    if payload is None:
+        raise ValueError("clipboard action must be one of: copy, cut, paste, paste_text, select_all")
+    if action == "paste_text" and text == "":
+        raise ValueError("clipboard paste_text requires non-empty text")
+    return normalize_action(payload)
+
+
+async def _run_desktop_helper(peer: Peer, to: str, args: list[str], *, timeout: float = 30.0):
+    return await peer._run_desktop_script(to, args, timeout=timeout)
 
 
 # ── Core ────────────────────────────────────────────────────────────────────
@@ -282,6 +371,182 @@ async def burrow_open_tunnel(to: str, local_port: int, remote_port: int) -> str:
     except Exception as exc:
         return f"Failed to open tunnel: {exc}"
     return f"Tunnel open: localhost:{local_port} -> {to}:{remote_port}"
+
+
+@mcp.tool()
+async def burrow_desktop_capabilities(to: str) -> str:
+    """Inspect remote desktop backend and helper capabilities on a peer."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    try:
+        info = await peer.get_desktop_capabilities(to)
+    except Exception as exc:
+        return f"Failed to inspect desktop capabilities: {exc}"
+    return _json_reply(_annotate_desktop_capabilities(info))
+
+
+@mcp.tool()
+async def burrow_desktop_open(to: str, backend: str = "auto",
+                              local_port: int = 0, remote_port: int = 0,
+                              readonly: bool = False, display: str = "",
+                              target_json: str = "") -> str:
+    """Open a Burrow-managed desktop session on a peer and tunnel it locally."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    try:
+        target = _desktop_target_from_args(display, target_json)
+        session = await peer.open_desktop_session(
+            to,
+            backend=backend,
+            local_port=local_port or None,
+            remote_port=remote_port,
+            readonly=readonly,
+            display=display or None,
+            target=target,
+        )
+        session = _annotate_desktop_session(session)
+        if target and not session.get("target"):
+            session["target"] = target
+    except Exception as exc:
+        return f"Failed to start remote desktop session: {exc}"
+    return _json_reply(session)
+
+
+@mcp.tool()
+async def burrow_desktop_list(to: str) -> str:
+    """List active desktop sessions for a peer, annotated with any locally-open tunnels."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    try:
+        remote = await _run_desktop_helper(peer, to, ["list-sessions"])
+    except Exception as exc:
+        return f"Failed to list desktop sessions: {exc}"
+    sessions = []
+    for session in remote.get("sessions", []):
+        local = peer._desktop_sessions.get(session.get("session_id"))
+        if local:
+            session = {**session, "local_port": local.get("local_port"), "viewer_url": local.get("viewer_url")}
+        sessions.append(_annotate_desktop_session(session))
+    return _json_reply({"peer": to, "sessions": sessions})
+
+
+@mcp.tool()
+async def burrow_desktop_snapshot(to: str, session_id: str) -> str:
+    """Capture a point-in-time screenshot for a remote desktop session."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    try:
+        snapshot = await _run_desktop_helper(peer, to, ["snapshot", "--session-id", session_id], timeout=60.0)
+    except Exception as exc:
+        return f"Failed to capture desktop snapshot: {exc}"
+    return _json_reply(snapshot)
+
+
+@mcp.tool()
+async def burrow_desktop_input(to: str, session_id: str, action_json: str) -> str:
+    """Send normalized computer-use input JSON to a remote desktop session."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    try:
+        result = await _run_desktop_helper(
+            peer,
+            to,
+            ["input", "--session-id", session_id, "--action-json", action_json],
+            timeout=60.0,
+        )
+    except Exception as exc:
+        return f"Failed to send desktop input: {exc}"
+    return _json_reply(result)
+
+
+@mcp.tool()
+async def burrow_desktop_clipboard(to: str, session_id: str, action: str = "paste",
+                                   text: str = "") -> str:
+    """Thin clipboard surface over desktop input.
+    copy/cut/paste/select_all emit Linux-style hotkeys; paste_text types text directly. This does not read or sync clipboard contents through burrow."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    try:
+        normalized = _build_clipboard_action(action, text)
+        result = await _run_desktop_helper(
+            peer,
+            to,
+            ["input", "--session-id", session_id, "--action-json", json.dumps(normalized, sort_keys=True)],
+            timeout=60.0,
+        )
+        result = {
+            **result,
+            "clipboard_surface": "thin-desktop-input",
+            "requested_action": action,
+            "synchronized": False,
+            "note": "Burrow currently exposes clipboard-oriented session actions via hotkeys/type_text only; it does not read or synchronize clipboard contents over the control plane. Actual clipboard support still depends on sidecar/backend capabilities.",
+        }
+    except Exception as exc:
+        return f"Failed to send clipboard action: {exc}"
+    return _json_reply(result)
+
+
+@mcp.tool()
+async def burrow_desktop_close(to: str, session_id: str) -> str:
+    """Close a Burrow-managed remote desktop session and local tunnel state."""
+    err = _validate_to(to)
+    if err:
+        return err
+    peer = await _auto_connect()
+    if not peer:
+        return NOT_CONNECTED
+    try:
+        result = await peer.stop_desktop_session(to, session_id)
+    except Exception as exc:
+        return f"Failed to stop remote desktop session: {exc}"
+    return _json_reply(result)
+
+
+@mcp.tool()
+async def burrow_desktop_connect(to: str, backend: str = "auto",
+                                 local_port: int = 0, remote_port: int = 0,
+                                 readonly: bool = False, display: str = "",
+                                 target_json: str = "") -> str:
+    """Compatibility alias for burrow_desktop_open()."""
+    return await burrow_desktop_open(
+        to,
+        backend=backend,
+        local_port=local_port,
+        remote_port=remote_port,
+        readonly=readonly,
+        display=display,
+        target_json=target_json,
+    )
+
+
+@mcp.tool()
+async def burrow_desktop_stop(to: str, session_id: str) -> str:
+    """Compatibility alias for burrow_desktop_close()."""
+    return await burrow_desktop_close(to, session_id)
 
 
 # ── Capabilities & Presence ─────────────────────────────────────────────────

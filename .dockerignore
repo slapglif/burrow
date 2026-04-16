@@ -1,0 +1,33 @@
+# Build artifacts
+.gradle/
+build/
+**/build/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Native build artifacts
+native/target/
+native/.cargo/
+
+# Android artifacts
+android/.gradle/
+android/.idea/
+android/build/
+android/app/build/
+
+# Misc
+node_modules/
+.DS_Store
+
+# Ignore tests cache
+tests/__pycache__/

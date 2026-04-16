@@ -478,6 +478,39 @@ async def test_task_assign_and_result(server):
         await ws_b.close()
 
 
+@pytest.mark.asyncio
+async def test_desktop_session_list_relay(server):
+    ws_a, _ = await register_client(server, "Alice")
+    ws_b, reg_b = await register_client(server, "Bob")
+    try:
+        await asyncio.wait_for(ws_a.recv(), 2)
+        await ws_a.send(json.dumps(protocol.desktop_session_list(reg_b["id"], req_id="desk-1")))
+        msg = json.loads(await asyncio.wait_for(ws_b.recv(), 2))
+        assert msg["type"] == protocol.DESKTOP_SESSION_LIST
+        assert msg["req_id"] == "desk-1"
+        assert msg["from_name"] == "Alice"
+    finally:
+        await ws_a.close()
+        await ws_b.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_input_relay(server):
+    ws_a, _ = await register_client(server, "Alice")
+    ws_b, reg_b = await register_client(server, "Bob")
+    try:
+        await asyncio.wait_for(ws_a.recv(), 2)
+        await ws_a.send(json.dumps(protocol.desktop_input(reg_b["id"], "sess-1", {"type": "click"})))
+        msg = json.loads(await asyncio.wait_for(ws_b.recv(), 2))
+        assert msg["type"] == protocol.DESKTOP_INPUT
+        assert msg["session_id"] == "sess-1"
+        assert msg["action"] == {"type": "click"}
+        assert msg["from_name"] == "Alice"
+    finally:
+        await ws_a.close()
+        await ws_b.close()
+
+
 # ---------------------------------------------------------------------------
 # Vote tests
 # ---------------------------------------------------------------------------

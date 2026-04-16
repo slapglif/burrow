@@ -1,0 +1,20 @@
+#!/usr/bin/env sh
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/gradle/wrapper/gradle-wrapper.jar" ] && [ -n "${JAVA_HOME:-}" ]; then
+  exec java -classpath "$SCRIPT_DIR/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+fi
+
+if [ -f "$SCRIPT_DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
+  exec java -classpath "$SCRIPT_DIR/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+fi
+
+if command -v gradle >/dev/null 2>&1; then
+  exec gradle "$@"
+fi
+
+echo "No Gradle executable available and wrapper jar not present."
+echo "Install Gradle or add gradle/wrapper/gradle-wrapper.jar to run the Android module."
+exit 1

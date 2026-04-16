@@ -350,6 +350,118 @@ class TestWorkerHeartbeat:
         assert result["current_job"] == "j1"
 
 
+class TestDesktopProtocol:
+    def test_session_open(self):
+        result = protocol.desktop_session_open(
+            "peer1",
+            "sess1",
+            backend="xpra",
+            readonly=True,
+            remote_port=14500,
+            display=":0",
+            permissions={"view": True, "control": False, "clipboard": False},
+            privacy={"supported": True, "enabled": False},
+            resume_token="resume-1",
+            resume_epoch=3,
+        )
+        assert result == {
+            "type": "desktop_session_open",
+            "to": "peer1",
+            "session_id": "sess1",
+            "backend": "xpra",
+            "readonly": True,
+            "remote_port": 14500,
+            "display": ":0",
+            "permissions": {"view": True, "control": False, "clipboard": False},
+            "privacy": {"supported": True, "enabled": False},
+            "resume_token": "resume-1",
+            "resume_epoch": 3,
+        }
+
+    def test_session_ready(self):
+        result = protocol.desktop_session_ready("peer1", "sess1", {"state": "ready"})
+        assert result == {
+            "type": "desktop_session_ready",
+            "to": "peer1",
+            "session_id": "sess1",
+            "session": {"state": "ready"},
+        }
+
+    def test_session_close(self):
+        result = protocol.desktop_session_close("peer1", "sess1")
+        assert result == {
+            "type": "desktop_session_close",
+            "to": "peer1",
+            "session_id": "sess1",
+        }
+
+    def test_session_list_request(self):
+        result = protocol.desktop_session_list("peer1", req_id="r1")
+        assert result == {
+            "type": "desktop_session_list",
+            "to": "peer1",
+            "req_id": "r1",
+        }
+
+    def test_session_list_response(self):
+        result = protocol.desktop_session_list("peer1", req_id="r1", sessions=[{"session_id": "sess1"}])
+        assert result == {
+            "type": "desktop_session_list",
+            "to": "peer1",
+            "req_id": "r1",
+            "sessions": [{"session_id": "sess1"}],
+        }
+
+    def test_frame_request(self):
+        result = protocol.desktop_frame_request("peer1", "sess1")
+        assert result == {
+            "type": "desktop_frame_request",
+            "to": "peer1",
+            "session_id": "sess1",
+        }
+
+    def test_frame(self):
+        result = protocol.desktop_frame("peer1", "sess1", {"mime_type": "image/png"})
+        assert result == {
+            "type": "desktop_frame",
+            "to": "peer1",
+            "session_id": "sess1",
+            "frame": {"mime_type": "image/png"},
+        }
+
+    def test_input(self):
+        result = protocol.desktop_input("peer1", "sess1", {"type": "click"})
+        assert result == {
+            "type": "desktop_input",
+            "to": "peer1",
+            "session_id": "sess1",
+            "action": {"type": "click"},
+        }
+
+    def test_permission(self):
+        result = protocol.desktop_permission(
+            "peer1",
+            "sess1",
+            {"control": True},
+            transition={
+                "previous": {"view": True, "control": False, "clipboard": False},
+                "current": {"view": True, "control": True, "clipboard": False},
+                "actor": "peer1",
+            },
+        )
+        assert result == {
+            "type": "desktop_permission",
+            "to": "peer1",
+            "session_id": "sess1",
+            "permission": {"control": True},
+            "transition": {
+                "previous": {"view": True, "control": False, "clipboard": False},
+                "current": {"view": True, "control": True, "clipboard": False},
+                "actor": "peer1",
+            },
+        }
+
+
 class TestElection:
     def test_start(self):
         result = protocol.election_start("e1")
@@ -429,6 +541,14 @@ _ALL_BUILDERS = [
     lambda: protocol.exec_response("p", "e1", 1, error="failed"),
     lambda: protocol.reverse_tunnel_request("p", "t1", 2222, 22),
     lambda: protocol.reverse_tunnel_accept("p", "t1"),
+    lambda: protocol.desktop_session_open("p", "s1", backend="xpra", readonly=True),
+    lambda: protocol.desktop_session_ready("p", "s1", {"state": "ready"}),
+    lambda: protocol.desktop_session_close("p", "s1"),
+    lambda: protocol.desktop_session_list(),
+    lambda: protocol.desktop_frame_request("p", "s1"),
+    lambda: protocol.desktop_frame("p", "s1", {"mime_type": "image/png"}),
+    lambda: protocol.desktop_input("p", "s1", {"type": "click"}),
+    lambda: protocol.desktop_permission("p", "s1", {"control": True}),
     lambda: protocol.update_available("0.6.0", "0.5.0", changelog="fixes"),
     lambda: protocol.update_status("0.6.0", "updated"),
     lambda: protocol.update_status("0.6.0", "failed", error="git pull failed"),
@@ -492,6 +612,10 @@ _TYPE_CONSTANTS = [
     protocol.QUEUE_STATUS, protocol.WORKER_REGISTER, protocol.WORKER_HEARTBEAT,
     protocol.EXEC_REQUEST, protocol.EXEC_RESPONSE,
     protocol.REVERSE_TUNNEL_REQUEST, protocol.REVERSE_TUNNEL_ACCEPT,
+    protocol.DESKTOP_SESSION_OPEN, protocol.DESKTOP_SESSION_READY,
+    protocol.DESKTOP_SESSION_CLOSE, protocol.DESKTOP_SESSION_LIST,
+    protocol.DESKTOP_FRAME_REQUEST, protocol.DESKTOP_FRAME,
+    protocol.DESKTOP_INPUT, protocol.DESKTOP_PERMISSION,
     protocol.UPDATE_AVAILABLE, protocol.UPDATE_STATUS,
 ]
 
