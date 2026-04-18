@@ -36,6 +36,14 @@ _SAFE_ENV_KEYS = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
                   "PYTHONPATH", "VIRTUAL_ENV", "UV_CACHE_DIR"}
 
 
+class OptionalFeatureUnsupported(RuntimeError):
+    """Raised when the connected registry does not support an optional message type."""
+
+    def __init__(self, msg_type: str):
+        self.msg_type = msg_type
+        super().__init__(f"registry does not support optional message type: {msg_type}")
+
+
 class Peer:
     BACKOFF_BASE = 1.0
     BACKOFF_MAX = 60.0
@@ -85,6 +93,7 @@ class Peer:
         self._stop_event = asyncio.Event()
         self._keepalive_task = None
         self._last_pong = 0.0
+        self._listen_ready = asyncio.Event()
 
         # Leader election
         self.leader_id = None
@@ -96,6 +105,8 @@ class Peer:
         # Groups and state
         self.groups = set()
         self.shared_state = {}        # scope -> {key: value}
+        self._unsupported_optional_types = set()
+        self._optional_probe_waiters = {}  # msg_type -> [Future]
 
         # Incoming task queue (for MCP)
         self.pending_tasks = []       # [{from, task_id, task, context}]
@@ -152,9 +163,11 @@ class Peer:
     async def listen(self):
         """Main receive loop — dispatch incoming messages by type."""
         try:
+            self._listen_ready.set()
             self._keepalive_task = asyncio.create_task(self._keepalive_loop())
             await self._listen_loop()
         finally:
+            self._listen_ready.clear()
             if self._keepalive_task:
                 self._keepalive_task.cancel()
             self._cleanup()
@@ -228,6 +241,7 @@ class Peer:
 
     def _cleanup(self):
         """Clean up transient state — preserve groups/capabilities for reconnect."""
+        self._listen_ready.clear()
         self._transfers.clear()
         for tunnel in self._tunnels.values():
             if tunnel.get("writer"):
@@ -260,6 +274,11 @@ class Peer:
             if not fut.done():
                 fut.set_exception(ConnectionError("disconnected"))
         self._desktop_frame_waiters.clear()
+        for waiters in self._optional_probe_waiters.values():
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_exception(ConnectionError("disconnected"))
+        self._optional_probe_waiters.clear()
         for session in self._desktop_sessions.values():
             server = session.get("tunnel_server")
             if server:
@@ -664,7 +683,7 @@ class Peer:
 
             # --- Errors / keepalive ---
             elif kind == protocol.ERROR:
-                print(f"Error: {data.get('message', '?')}")
+                self._handle_error(data)
 
             elif kind == protocol.PONG:
                 self._last_pong = time.monotonic()
@@ -728,12 +747,8 @@ class Peer:
     # --- Peer discovery ---
 
     async def request_peers(self, timeout: float = 5.0) -> dict:
-        req_id = uuid.uuid4().hex[:8]
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = fut
-        await self._send(protocol.peers(req_id=req_id))
         try:
-            response = await asyncio.wait_for(fut, timeout)
+            response = await self._send_request(protocol.peers(), timeout=timeout)
             peer_list = response.get("peers", [])
             if isinstance(peer_list, list):
                 self.peers = {p["id"]: p["name"] for p in peer_list}
@@ -746,8 +761,6 @@ class Peer:
             return response
         except asyncio.TimeoutError:
             return {"peers": []}
-        finally:
-            self._pending_requests.pop(req_id, None)
 
     # --- Capabilities ---
 
@@ -757,30 +770,26 @@ class Peer:
 
     async def query_capabilities(self, tools=None, skills=None, tags=None,
                                  timeout: float = 5.0) -> list[dict]:
-        req_id = uuid.uuid4().hex[:8]
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = fut
         msg = protocol.capability_query(tools, skills, tags)
-        msg["req_id"] = req_id
-        await self._send(msg)
         try:
-            response = await asyncio.wait_for(fut, timeout)
+            response = await self._send_request(msg, timeout=timeout)
             return response.get("matches", [])
         except asyncio.TimeoutError:
             return []
-        finally:
-            self._pending_requests.pop(req_id, None)
 
     # --- Status / Presence ---
 
-    async def update_status(self, status: str, task: str = "", metadata: dict | None = None):
-        await self._send(protocol.status_update(status, task, metadata))
+    async def update_status(self, status: str, task: str = "", metadata: dict | None = None) -> bool:
+        return await self._send_optional_message(protocol.status_update(status, task, metadata))
 
     # --- Groups ---
 
-    async def join_group(self, group: str):
-        self.groups.add(group)
-        await self._send(protocol.group_join(group))
+    async def join_group(self, group: str) -> bool:
+        if await self._send_optional_message(protocol.group_join(group)):
+            self.groups.add(group)
+            return True
+        self.groups.discard(group)
+        return False
 
     async def leave_group(self, group: str):
         self.groups.discard(group)
@@ -802,34 +811,18 @@ class Peer:
         return msg_id
 
     async def list_groups(self, timeout: float = 5.0) -> dict:
-        req_id = uuid.uuid4().hex[:8]
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = fut
-        msg = protocol.group_list()
-        msg["req_id"] = req_id
-        await self._send(msg)
         try:
-            response = await asyncio.wait_for(fut, timeout)
+            response = await self._send_optional_request(protocol.group_list(), timeout=timeout)
             return response.get("groups", {})
         except asyncio.TimeoutError:
             return {}
-        finally:
-            self._pending_requests.pop(req_id, None)
 
     async def get_group_members(self, group: str, timeout: float = 5.0) -> list[dict]:
-        req_id = uuid.uuid4().hex[:8]
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = fut
-        msg = protocol.group_members(group)
-        msg["req_id"] = req_id
-        await self._send(msg)
         try:
-            response = await asyncio.wait_for(fut, timeout)
+            response = await self._send_optional_request(protocol.group_members(group), timeout=timeout)
             return response.get("members", [])
         except asyncio.TimeoutError:
             return []
-        finally:
-            self._pending_requests.pop(req_id, None)
 
     # --- Shared State ---
 
@@ -841,19 +834,12 @@ class Peer:
         self.shared_state[scope][key] = value
 
     async def get_state(self, key: str, group: str | None = None, timeout: float = 5.0):
-        req_id = uuid.uuid4().hex[:8]
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = fut
         msg = protocol.state_get(key, group)
-        msg["req_id"] = req_id
-        await self._send(msg)
         try:
-            response = await asyncio.wait_for(fut, timeout)
+            response = await self._send_request(msg, timeout=timeout)
             return response.get("value")
         except asyncio.TimeoutError:
             return None
-        finally:
-            self._pending_requests.pop(req_id, None)
 
     async def delete_state(self, key: str, group: str | None = None):
         await self._send(protocol.state_delete(key, group))
@@ -862,21 +848,14 @@ class Peer:
             self.shared_state[scope].pop(key, None)
 
     async def sync_state(self, group: str | None = None, timeout: float = 5.0) -> dict:
-        req_id = uuid.uuid4().hex[:8]
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = fut
         msg = protocol.state_sync(group)
-        msg["req_id"] = req_id
-        await self._send(msg)
         try:
-            response = await asyncio.wait_for(fut, timeout)
+            response = await self._send_request(msg, timeout=timeout)
             scope = group or "_global"
             self.shared_state[scope] = response.get("state", {})
             return self.shared_state[scope]
         except asyncio.TimeoutError:
             return {}
-        finally:
-            self._pending_requests.pop(req_id, None)
 
     # --- Task broadcasting ---
 
@@ -1048,18 +1027,12 @@ class Peer:
     async def check_job_status(self, to: str, job_id: str,
                                 timeout: float = 5.0) -> dict:
         """Query a remote peer for job status."""
-        req_id = uuid.uuid4().hex[:8]
         target = self._resolve(to)
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = fut
-        msg = protocol.job_status(target, job_id, req_id=req_id)
-        await self._send(msg)
+        msg = protocol.job_status(target, job_id)
         try:
-            return await asyncio.wait_for(fut, timeout)
+            return await self._send_request(msg, timeout=timeout)
         except asyncio.TimeoutError:
             return {"job_id": job_id, "status": "unknown"}
-        finally:
-            self._pending_requests.pop(req_id, None)
 
     async def cancel_job(self, to: str, job_id: str):
         """Cancel a job on a remote peer."""
@@ -1068,18 +1041,11 @@ class Peer:
 
     async def list_all_jobs(self, timeout: float = 5.0) -> list[dict]:
         """List all jobs tracked by the server."""
-        req_id = uuid.uuid4().hex[:8]
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = fut
-        msg = protocol.job_list(req_id=req_id)
-        await self._send(msg)
         try:
-            response = await asyncio.wait_for(fut, timeout)
+            response = await self._send_request(protocol.job_list(), timeout=timeout)
             return response.get("jobs", [])
         except asyncio.TimeoutError:
             return []
-        finally:
-            self._pending_requests.pop(req_id, None)
 
     def init_ray(self, address: str | None = None) -> bool:
         """Initialize local Ray runtime."""
@@ -1991,6 +1957,14 @@ class Peer:
 
     # --- Internal helpers ---
 
+    _OPTIONAL_COMPAT_TYPES = {
+        protocol.GROUP_JOIN,
+        protocol.GROUP_LIST,
+        protocol.GROUP_MEMBERS,
+        protocol.STATUS_UPDATE,
+    }
+    _OPTIONAL_COMPAT_TIMEOUT = 0.2
+
     def _resolve(self, name_or_id: str) -> str:
         if name_or_id in self.peers:
             return name_or_id
@@ -1998,6 +1972,106 @@ class Peer:
             if pname.lower() == name_or_id.lower():
                 return pid
         return name_or_id
+
+    def _handle_error(self, data: dict):
+        message = str(data.get("message", "?"))
+        msg_type = self._parse_unknown_optional_type(message)
+        if msg_type:
+            self._unsupported_optional_types.add(msg_type)
+            for fut in self._optional_probe_waiters.pop(msg_type, []):
+                if not fut.done():
+                    fut.set_result(False)
+            return
+        print(f"Error: {message}")
+
+    def _parse_unknown_optional_type(self, message: str) -> str | None:
+        prefix = "unknown type:"
+        if not message.startswith(prefix):
+            return None
+        msg_type = message[len(prefix):].strip()
+        if msg_type in self._OPTIONAL_COMPAT_TYPES:
+            return msg_type
+        return None
+
+    def _ensure_request_loop(self):
+        if not self.ws:
+            raise ConnectionError("Not connected")
+        if not self._listen_ready.is_set():
+            raise RuntimeError(
+                "Burrow request/response calls require an active listen loop. "
+                "Start peer.run() or peer.listen() in the background before calling request_peers(), "
+                "query_capabilities(), group_members(), or other request-based helpers."
+            )
+
+    async def _send_request(self, msg: dict, timeout: float = 5.0) -> dict:
+        self._ensure_request_loop()
+        req_id = uuid.uuid4().hex[:8]
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_requests[req_id] = fut
+        outbound = dict(msg)
+        outbound["req_id"] = req_id
+        await self._send(outbound)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        finally:
+            self._pending_requests.pop(req_id, None)
+
+    async def _send_optional_request(self, msg: dict, timeout: float = 5.0) -> dict:
+        msg_type = msg.get("type")
+        if msg_type in self._unsupported_optional_types:
+            raise OptionalFeatureUnsupported(msg_type)
+
+        self._ensure_request_loop()
+        req_id = uuid.uuid4().hex[:8]
+        req_fut = asyncio.get_running_loop().create_future()
+        unsupported_fut = asyncio.get_running_loop().create_future()
+        self._pending_requests[req_id] = req_fut
+        self._optional_probe_waiters.setdefault(msg_type, []).append(unsupported_fut)
+        outbound = dict(msg)
+        outbound["req_id"] = req_id
+        try:
+            await self._send(outbound)
+            done, _ = await asyncio.wait(
+                {req_fut, unsupported_fut},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if req_fut in done:
+                return req_fut.result()
+            if unsupported_fut in done and unsupported_fut.result() is False:
+                raise OptionalFeatureUnsupported(msg_type)
+            raise asyncio.TimeoutError()
+        finally:
+            self._pending_requests.pop(req_id, None)
+            waiters = self._optional_probe_waiters.get(msg_type)
+            if waiters and unsupported_fut in waiters:
+                waiters.remove(unsupported_fut)
+                if not waiters:
+                    self._optional_probe_waiters.pop(msg_type, None)
+
+    async def _send_optional_message(self, msg: dict) -> bool:
+        msg_type = msg.get("type")
+        if msg_type in self._unsupported_optional_types:
+            return False
+        if msg_type not in self._OPTIONAL_COMPAT_TYPES:
+            await self._send(msg)
+            return True
+
+        self._ensure_request_loop()
+        fut = asyncio.get_running_loop().create_future()
+        self._optional_probe_waiters.setdefault(msg_type, []).append(fut)
+        try:
+            await self._send(msg)
+            try:
+                return await asyncio.wait_for(asyncio.shield(fut), self._OPTIONAL_COMPAT_TIMEOUT)
+            except asyncio.TimeoutError:
+                return True
+        finally:
+            waiters = self._optional_probe_waiters.get(msg_type)
+            if waiters and fut in waiters:
+                waiters.remove(fut)
+                if not waiters:
+                    self._optional_probe_waiters.pop(msg_type, None)
 
     async def _send(self, msg: dict):
         if not self.ws:

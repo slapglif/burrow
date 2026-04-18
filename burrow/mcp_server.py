@@ -11,7 +11,7 @@ import sys
 from mcp.server.fastmcp import FastMCP
 
 from burrow.computer_use import normalize_action
-from burrow.peer import Peer
+from burrow.peer import OptionalFeatureUnsupported, Peer
 from burrow.server import serve
 from burrow.protocol import DEFAULT_PORT
 
@@ -35,6 +35,16 @@ NOT_CONNECTED = (
     "Not connected to the burrow swarm. "
     "Call burrow_connect() first — no arguments needed, it auto-connects to wss://reg.ai-smith.net. "
     "Typical workflow: burrow_connect() → burrow_list_peers() → burrow_join_group('agent-pool') → collaborate."
+)
+
+GROUPS_UNSUPPORTED = (
+    "Registry compatibility fallback: this registry does not support groups yet, "
+    "so Burrow group features are unavailable here. Direct messaging still works with burrow_send_message()."
+)
+
+STATUS_UNSUPPORTED = (
+    "Registry compatibility fallback: this registry does not support status updates yet, "
+    "so your Burrow presence was not updated."
 )
 
 
@@ -604,7 +614,8 @@ async def burrow_update_status(status: str, task: str = "") -> str:
     peer = await _auto_connect()
     if not peer:
         return NOT_CONNECTED
-    await peer.update_status(status, task)
+    if not await peer.update_status(status, task):
+        return STATUS_UNSUPPORTED
     return f"Status updated: {status}" + (f" ({task})" if task else "")
 
 
@@ -619,7 +630,8 @@ async def burrow_join_group(group: str) -> str:
         return NOT_CONNECTED
     if not group or not group.strip():
         return "Error: group name cannot be empty. Common groups: 'agent-pool', 'dev', 'tasks'."
-    await peer.join_group(group)
+    if not await peer.join_group(group):
+        return GROUPS_UNSUPPORTED
     return (f"Joined group '{group}'. "
             f"Use burrow_group_message('{group}', 'hello') to message the group, "
             f"or burrow_group_members('{group}') to see who's in it.")
@@ -643,7 +655,8 @@ async def burrow_group_message(group: str, body: str) -> str:
     if not peer:
         return NOT_CONNECTED
     if group not in peer.groups:
-        await peer.join_group(group)
+        if not await peer.join_group(group):
+            return GROUPS_UNSUPPORTED
     try:
         await peer.send_group_message(group, body, wait_ack=True)
     except Exception as exc:
@@ -659,7 +672,10 @@ async def burrow_list_groups() -> str:
     peer = await _auto_connect()
     if not peer:
         return NOT_CONNECTED
-    groups = await peer.list_groups()
+    try:
+        groups = await peer.list_groups()
+    except OptionalFeatureUnsupported:
+        return GROUPS_UNSUPPORTED
     if not groups:
         return ("No active groups. Groups are created when the first peer joins. "
                 "Create one with: burrow_join_group('agent-pool')")
@@ -681,7 +697,10 @@ async def burrow_group_members(group: str) -> str:
     peer = await _auto_connect()
     if not peer:
         return NOT_CONNECTED
-    members = await peer.get_group_members(group)
+    try:
+        members = await peer.get_group_members(group)
+    except OptionalFeatureUnsupported:
+        return GROUPS_UNSUPPORTED
     if not members:
         return (f"No members in group '{group}'. Either the group doesn't exist yet, "
                 f"or everyone left. Join it with: burrow_join_group('{group}')")
