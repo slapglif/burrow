@@ -28,42 +28,84 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy to registry server
-        uses: appleboy/ssh-action@v1
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          host: ${{ secrets.REGISTRY_HOST }}
-          username: ${{ secrets.REGISTRY_USER }}
-          key: ${{ secrets.REGISTRY_SSH_KEY }}
-          port: ${{ secrets.REGISTRY_PORT || 22 }}
-          script: |
-            set -euo pipefail
-            cd ${{ secrets.REGISTRY_PATH || '/opt/burrow' }}
+          ssh-private-key: ${{ secrets.REGISTRY_SSH_KEY }}
 
-            # Pull latest code
-            git fetch origin master
-            git reset --hard origin/master
+      - name: Deploy to registry server
+        env:
+          REGISTRY_HOST: ${{ secrets.REGISTRY_HOST }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PORT: ${{ secrets.REGISTRY_PORT }}
+          REGISTRY_PATH: ${{ secrets.REGISTRY_PATH }}
+        run: |
+          set -euo pipefail
+          host="${REGISTRY_HOST}"
+          user="${REGISTRY_USER}"
+          port="${REGISTRY_PORT:-22}"
+          path="${REGISTRY_PATH:-/opt/burrow}"
 
-            # Update venv + deps
-            if ! command -v uv &>/dev/null; then
-              curl -LsSf https://astral.sh/uv/install.sh | sh
-              export PATH="$HOME/.local/bin:$PATH"
-            fi
-            uv venv --python 3.12 || true
-            uv pip install -e .
+          if [ -z "$host" ] || [ -z "$user" ]; then
+            echo "Missing REGISTRY_HOST or REGISTRY_USER secret" >&2
+            exit 1
+          fi
 
-            # Restart the registry service
-            if systemctl is-active --quiet burrow-registry; then
-              sudo systemctl restart burrow-registry
-            elif command -v supervisorctl &>/dev/null; then
-              supervisorctl restart burrow-registry
-            else
-              # Fallback: kill and restart
-              pkill -f "burrow.server" || true
-              sleep 1
-              nohup uv run python -m burrow.server --port 7654 > /var/log/burrow-registry.log 2>&1 &
-            fi
+          ssh_opts=(
+            -p "$port"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=accept-new
+          )
 
-            echo "Registry deployed: $(git log --oneline -1)"
+          remote_script=$(cat <<'REMOTE'
+          set -euxo pipefail
+          cd "__REGISTRY_PATH__"
+
+          git fetch origin master
+          git reset --hard origin/master
+
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          uv venv --python 3.12 || true
+          uv pip install -e .
+
+          if systemctl list-unit-files | grep -q '^burrow-registry'; then
+            sudo systemctl restart burrow-registry
+            sudo systemctl --no-pager --full status burrow-registry || true
+          elif command -v supervisorctl >/dev/null 2>&1; then
+            supervisorctl restart burrow-registry
+            supervisorctl status burrow-registry || true
+          else
+            pkill -f "python -m burrow.server" || true
+            sleep 1
+            nohup uv run python -m burrow.server --port 7654 > /var/log/burrow-registry.log 2>&1 &
+            sleep 2
+            pgrep -af "python -m burrow.server" || true
+          fi
+
+          echo "Registry deployed: $(git log --oneline -1)"
+          REMOTE
+          )
+
+          remote_script="${remote_script//__REGISTRY_PATH__/$path}"
+
+          if ! ssh "${ssh_opts[@]}" "$user@$host" "$remote_script"; then
+            echo "Remote deploy failed; collecting diagnostics" >&2
+            ssh "${ssh_opts[@]}" "$user@$host" "
+              set +e
+              if command -v systemctl >/dev/null 2>&1; then
+                sudo systemctl --no-pager --full status burrow-registry || true
+                sudo journalctl -u burrow-registry -n 200 --no-pager || true
+              fi
+              if [ -f /var/log/burrow-registry.log ]; then
+                tail -n 200 /var/log/burrow-registry.log || true
+              fi
+            " || true
+            exit 1
+          fi
 
       - name: Verify registry health
         run: |
