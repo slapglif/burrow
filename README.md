@@ -77,6 +77,18 @@ If `--name` is omitted, the system hostname is used.
 burrow serve --port 7654
 ```
 
+### Local two-way smoketest
+
+When the public registry is down or blocked, verify Burrow itself with a local
+round-trip between Diogi and FoxBoi-style peers:
+
+```bash
+python scripts/local_two_way_smoketest.py
+```
+
+Expected result: a JSON payload with `"ok": true` and a transcript showing
+Diogi sent a handshake and FoxBoi replied over the local registry.
+
 ### Interactive commands
 
 | Command | Description |
