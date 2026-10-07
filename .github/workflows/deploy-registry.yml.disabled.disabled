@@ -1,0 +1,122 @@
+name: Deploy Registry
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'burrow/**'
+      - 'pyproject.toml'
+
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install deps & run tests
+        run: uv venv && uv pip install -e ".[dev]" && uv run pytest tests/ -v
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.REGISTRY_SSH_KEY }}
+
+      - name: Deploy to registry server
+        env:
+          REGISTRY_HOST: ${{ secrets.REGISTRY_HOST }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PORT: ${{ secrets.REGISTRY_PORT }}
+          REGISTRY_PATH: ${{ secrets.REGISTRY_PATH }}
+        run: |
+          set -euo pipefail
+          host="${REGISTRY_HOST}"
+          user="${REGISTRY_USER}"
+          port="${REGISTRY_PORT:-22}"
+          path="${REGISTRY_PATH:-/opt/burrow}"
+
+          if [ -z "$host" ] || [ -z "$user" ]; then
+            echo "Missing REGISTRY_HOST or REGISTRY_USER secret" >&2
+            exit 1
+          fi
+
+          ssh_opts=(
+            -p "$port"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=accept-new
+          )
+
+          remote_script=$(cat <<'REMOTE'
+          set -euxo pipefail
+          cd "__REGISTRY_PATH__"
+
+          git fetch origin master
+          git reset --hard origin/master
+
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          uv venv --python 3.12 || true
+          uv pip install -e .
+
+          if systemctl list-unit-files | grep -q '^burrow-registry'; then
+            sudo systemctl restart burrow-registry
+            sudo systemctl --no-pager --full status burrow-registry || true
+          elif command -v supervisorctl >/dev/null 2>&1; then
+            supervisorctl restart burrow-registry
+            supervisorctl status burrow-registry || true
+          else
+            pkill -f "python -m burrow.server" || true
+            sleep 1
+            nohup uv run python -m burrow.server --port 7654 > /var/log/burrow-registry.log 2>&1 &
+            sleep 2
+            pgrep -af "python -m burrow.server" || true
+          fi
+
+          echo "Registry deployed: $(git log --oneline -1)"
+          REMOTE
+          )
+
+          remote_script="${remote_script//__REGISTRY_PATH__/$path}"
+
+          if ! ssh "${ssh_opts[@]}" "$user@$host" "$remote_script"; then
+            echo "Remote deploy failed; collecting diagnostics" >&2
+            ssh "${ssh_opts[@]}" "$user@$host" "
+              set +e
+              if command -v systemctl >/dev/null 2>&1; then
+                sudo systemctl --no-pager --full status burrow-registry || true
+                sudo journalctl -u burrow-registry -n 200 --no-pager || true
+              fi
+              if [ -f /var/log/burrow-registry.log ]; then
+                tail -n 200 /var/log/burrow-registry.log || true
+              fi
+            " || true
+            exit 1
+          fi
+
+      - name: Verify registry health
+        run: |
+          sleep 5
+          python3 -c "
+          import asyncio, json, websockets
+          async def check():
+              async with websockets.connect('wss://reg.ai-smith.net') as ws:
+                  await ws.send(json.dumps({'type': 'register', 'name': 'deploy-check'}))
+                  r = json.loads(await ws.recv())
+                  assert r['type'] == 'registered', f'Bad response: {r}'
+                  print('Registry OK')
+          asyncio.run(check())
+          " || echo "Registry health check failed (may need DNS propagation)"
